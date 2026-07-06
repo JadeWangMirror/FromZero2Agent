@@ -27,11 +27,11 @@ ACCENT = "#4493F8"
 ACCENT_DIM = "#1F6FEB"
 
 # 角色谱（刻意区分，避免全蓝分不清）：
-#   用户 YOU      = 蓝
-#   Agent MIRROR  = 橙（回复标签 + 回复左边框）
+#   用户 YOU      = 橙
+#   Agent MIRROR  = 蓝（回复标签 + 回复左边框）
 #   处理中 Thinking = 琥珀
-COL_USER = "#58A6FF"
-COL_AGENT = "#F0883E"
+COL_USER = "#F0883E"
+COL_AGENT = "#58A6FF"
 COL_WORK = "#D29922"
 
 # ── MIRROR Logo（蓝色渐变）─────────────────────────────────
@@ -266,7 +266,7 @@ class MirrorApp(App):
         height: auto;
         margin: 0;
         padding: 0 0 0 1;
-        border-left: solid #F0883E;   /* agent 橙，与 | MIRROR 标签同色 */
+        border-left: solid #58A6FF;   /* agent 蓝，与 | MIRROR 标签同色 */
     }
     MirrorMd > * { margin: 0; padding: 0; }
 
@@ -275,7 +275,7 @@ class MirrorApp(App):
         height: auto;
         margin: 0;
         padding: 0 0 0 1;
-        border-left: solid #F0883E;
+        border-left: solid #58A6FF;
     }
 
     /* 思考区 */
