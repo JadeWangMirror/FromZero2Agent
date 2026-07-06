@@ -15,3 +15,8 @@ Thumbs.db
 *.log
 sessions/
 tools/custom/_usage.json
+
+# dev / generated
+/_*.py
+/MIRROR.md
+/config.json
