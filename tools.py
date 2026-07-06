@@ -17,16 +17,18 @@ class Tool:
     description: str
     parameters: dict[str, Any]  # JSON Schema properties
     fn: Callable[..., str]
+    required: list[str] | None = None  # None → 全部参数必填
 
     def to_param(self) -> dict[str, Any]:
         """转为 Anthropic tool 定义格式。"""
+        req = self.required if self.required is not None else list(self.parameters.keys())
         return {
             "name": self.name,
             "description": self.description,
             "input_schema": {
                 "type": "object",
                 "properties": self.parameters,
-                "required": list(self.parameters.keys()),
+                "required": req,
             },
         }
 

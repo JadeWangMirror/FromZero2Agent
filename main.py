@@ -16,13 +16,17 @@ def main() -> None:
         print("错误: 请设置 DEEPSEEK_API_KEY 环境变量或在 .env 文件中配置。")
         sys.exit(1)
 
+    from config import Config
+
+    cfg = Config.load()
+
     # --cli 参数走命令行模式，否则走 TUI
     if "--cli" in sys.argv:
         from agent import create_agent
 
-        agent = create_agent(api_key=api_key)
+        agent = create_agent(api_key=api_key, config=cfg)
         print("=" * 50)
-        print("  LLM Agent — DeepSeek (命令行模式)")
+        print(f"  SPARK Agent — {cfg.model}")
         print("  输入 'exit' 或 'quit' 退出")
         print("=" * 50)
 
@@ -44,9 +48,9 @@ def main() -> None:
             def callback(event: str, data: dict) -> None:
                 if event == "tool_call":
                     args_fmt = ", ".join(f"{k}={v}" for k, v in data["args"].items())
-                    print(f"  🔧 调用工具: {data['name']}({args_fmt})")
+                    print(f"  > 调用工具: {data['name']}({args_fmt})")
                 elif event == "tool_result":
-                    print(f"  ↩ 结果: {data['result']}")
+                    print(f"  < 结果: {data['result']}")
 
             try:
                 answer = agent.run(user_input, callback=callback)
@@ -55,7 +59,7 @@ def main() -> None:
                 print(f"错误: {e}")
     else:
         from tui import run_tui
-        run_tui(api_key)
+        run_tui(api_key, cfg)
 
 
 if __name__ == "__main__":

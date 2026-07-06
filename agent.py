@@ -16,13 +16,43 @@ from tools import ToolRegistry
 # ── System Prompt ──────────────────────────────────────────
 
 SYSTEM_PROMPT = """\
-You are a helpful AI assistant with access to tools. Follow these rules:
+You are SPARK, an AI agent that can EXTEND ITSELF (create tools) and DELEGATE \
+(sub-agents) to solve tasks.
 
-1. When you need information that a tool can provide, use the tool immediately — do not guess.
-2. After receiving a tool result, reason about it and decide your next step.
-3. When you have enough information to answer the user, respond directly in natural language.
-4. If a tool returns an error, explain the problem to the user and suggest an alternative.
-5. Always respond in the same language the user used.
+CORE RULES
+1. Use a tool for anything a tool can do — never guess facts you can look up or compute.
+2. After each tool result, reason about it, then decide the next step.
+3. When you have the answer, respond directly in the user's language.
+4. On tool error, diagnose the cause and try an alternative.
+
+TOOL SELECTION
+- Pick the most specific tool (e.g. read_file, not run_python, for reading).
+- If unsure what exists, call list_tools.
+
+SELF-IMPROVEMENT — creating tools (create_tool):
+BUILD a tool when: the user wants a REUSABLE capability ("every time"/"always"), \
+a stable multi-step operation recurs, OR a needed capability is uncovered and too \
+complex for a few lines of run_python.
+Do NOT build for: one-off tasks (use run_python), simple Q&A, or anything an \
+existing tool already does (call list_tools first).
+When building:
+- Write a clear description — it decides WHEN the tool gets used later.
+- Define `execute(**kwargs) -> str`; include test_code; debug with read_tool + \
+run_python (max ~3 retries).
+- Inside a tool you may call other tools via `use("tool_name", **kwargs)`.
+When unsure if a tool is worth building, delegate to spawn_agent("tool_designer") \
+— it judges value first and only builds if genuinely reusable.
+
+DELEGATION — use spawn_agent(role, task) for complex, self-contained work:
+- researcher: look up multiple things online.
+- planner: decompose a big task before executing.
+- coder: implement + verify code in isolation.
+- critic: review a plan or code for problems.
+- tool_designer: decide whether a new tool is worth building, then build + test it.
+Delegate when a sub-task would clutter the main conversation; keep simple work inline.
+
+Always verify code with a tool before claiming it works. Prefer concrete results \
+over assumptions.
 """
 
 # ── 回调类型 ───────────────────────────────────────────────
@@ -45,31 +75,110 @@ class Agent:
         max_turns: int = 10,
         tools: ToolRegistry | None = None,
         max_history: int = 50,
+        temperature: float = 1.0,
+        system_prompt: str | None = None,
+        toolforge=None,
     ):
         self.llm = LLMClient(
             api_key=api_key,
             base_url=base_url,
             model=model,
             max_tokens=max_tokens,
+            temperature=temperature,
         )
         self.tools = tools
+        self.toolforge = toolforge
         self.max_turns = max_turns
         self._history: list[MessageParam] = []
         self._max_history = max_history
+        # 自定义 system prompt，空则用内置默认
+        self.system_prompt = system_prompt.strip() if system_prompt else None
+        # 层次化 agent
+        self._depth = 0
+        self._max_depth = 3
+        self._current_callback: StepCallback | None = None
+
+    def _build_system_prompt(self) -> str:
+        """构建 system prompt：基础指导（或用户自定义）+ 动态工具清单。"""
+        base = self.system_prompt if self.system_prompt else SYSTEM_PROMPT
+        if not self.tools:
+            return base
+        lines = ["", "AVAILABLE TOOLS:"]
+        for name, t in self.tools._tools.items():
+            desc = t.description.split("\n")[0].strip()
+            if len(desc) > 90:
+                desc = desc[:87] + "..."
+            lines.append(f"  - {name}: {desc}")
+        return base + "\n" + "\n".join(lines)
+
+    # ── 层次化:派生子 agent ───────────────────────────────
+
+    def spawn_as_tool(self, role: str, task: str, max_turns: int = 8) -> str:
+        """作为工具被调用:派生一个专职子 agent 执行子任务。
+
+        子 agent 独立上下文、共享工具集、专用 system prompt。
+        中间事件通过 'sub:*' 转发给当前 callback。
+        """
+        from subagents import get_prompt, role_names
+
+        if self._depth >= self._max_depth:
+            return (f"Error: max agent nesting depth ({self._max_depth}) reached. "
+                    f"Complete the work at this level instead of spawning more.")
+        role = role.lower().strip()
+        prompt = get_prompt(role)
+        if prompt is None:
+            return (f"Error: unknown role '{role}'. Available: {', '.join(role_names())}")
+
+        sub = Agent(
+            api_key=self.llm.api_key,
+            base_url=self.llm.base_url,
+            model=self.llm.model,
+            max_tokens=self.llm.max_tokens,
+            temperature=self.llm.temperature,
+            max_turns=max_turns,
+            tools=self.tools,
+            toolforge=self.toolforge,
+            system_prompt=prompt,
+        )
+        sub._depth = self._depth + 1
+        sub_cb = self._make_sub_callback(role)
+        try:
+            result = sub.run(task, callback=sub_cb)
+        except Exception as e:
+            return f"Sub-agent '{role}' failed: {e}"
+        return f"[{role}] {result}"
+
+    def _make_sub_callback(self, role: str) -> StepCallback:
+        """构造子 agent 回调,把事件加 role 前缀转发给主 callback。"""
+        def cb(ev: str, data: dict) -> None:
+            if self._current_callback:
+                self._current_callback(f"sub:{ev}", {"role": role, **data})
+        return cb
 
     def reset_history(self) -> None:
         """清空对话历史。"""
         self._history.clear()
+
+    def export_history(self) -> list[dict]:
+        """导出对话历史为可序列化列表（用于持久化）。"""
+        return [dict(m) for m in self._history]
+
+    def import_history(self, data: list[dict]) -> None:
+        """从列表导入对话历史（覆盖现有历史）。"""
+        self._history = [dict(m) for m in data]  # type: ignore[arg-type]
 
     def run(self, task: str, callback: StepCallback | None = None) -> str:
         """执行 Agent 对话（流式 thinking，自动维护上下文）。
 
         callback 事件:
           "thinking"     → {"text": str}      # 思考增量（流式逐 token）
+          "text_delta"   → {"text": str}      # 最终回复增量（流式逐 token）
           "tool_call"    → {"name": str, "args": dict}
           "tool_result"  → {"name": str, "result": str}
-          "text"         → {"text": str}      # 最终回复
+          "text"         → {"text": str}      # 最终回复完整文本
+          "sub:*"        → 子 agent 事件,{"role":..., ...}
         """
+        self._current_callback = callback
         # 从历史 + 当前用户消息开始
         messages: list[MessageParam] = list(self._history)
         messages.append({"role": "user", "content": task})
@@ -81,11 +190,13 @@ class Agent:
             def on_stream(ev: StreamEvent) -> None:
                 if ev.type == "thinking_delta" and callback:
                     callback("thinking", {"text": ev.text})
+                elif ev.type == "text_delta" and callback:
+                    callback("text_delta", {"text": ev.text})
 
             response = self.llm.send_stream(
                 messages=messages,
                 tools=tool_params,
-                system=SYSTEM_PROMPT,
+                system=self._build_system_prompt(),
                 on_event=on_stream,
             )
 
@@ -165,7 +276,53 @@ class Agent:
 
 # ── 便捷函数 ───────────────────────────────────────────────
 
-def create_agent(api_key: str | None = None, **kwargs) -> Agent:
-    from tools import create_default_registry
+def create_agent(api_key: str | None = None, config=None, **kwargs) -> Agent:
+    """创建带完整工具集 + 自我完善能力的 Agent。
+
+    注册顺序: 基础工具 → 文件工具 → 网络工具 → 自造工具(load) → 元工具。
+    """
+    from filetools import create_file_tools
+    from toolforge import ToolForge
+    from tools import ToolRegistry, create_default_registry
+    from webtools import create_web_tools
+
     registry = create_default_registry()
-    return Agent(api_key=api_key, tools=registry, **kwargs)
+    for tool in create_file_tools():
+        registry.register(tool)
+    for tool in create_web_tools():
+        registry.register(tool)
+
+    # 自我完善系统:加载已有自造工具 + 注册元工具
+    forge = ToolForge(registry)
+    forge.load_existing()
+    for tool in forge.get_meta_tools():
+        registry.register(tool)
+
+    # 从 config 提取字段作为默认值
+    if config is not None:
+        cfg_fields = {
+            "model", "base_url", "max_tokens", "max_turns",
+            "max_history", "temperature", "system_prompt",
+        }
+        for f in cfg_fields:
+            kwargs.setdefault(f, getattr(config, f))
+
+    agent = Agent(api_key=api_key, tools=registry, toolforge=forge, **kwargs)
+
+    # 层次化:注册 spawn_agent 工具(绑定到该 agent 实例)
+    from tools import Tool
+    registry.register(Tool(
+        "spawn_agent",
+        "Spawn a specialized sub-agent for a sub-task. Use for: research (web), "
+        "task decomposition, coding+verification, critique, or deciding+building a tool. "
+        "Sub-agent runs with its own context and shared tools. "
+        "roles: researcher | planner | coder | critic | tool_designer | general. "
+        "Prefer this over doing everything inline for complex multi-step work.",
+        {"role": {"type": "string", "description": "researcher|planner|coder|critic|tool_designer|general"},
+         "task": {"type": "string", "description": "clear, self-contained sub-task description"},
+         "max_turns": {"type": "integer", "description": "default 8"}},
+        agent.spawn_as_tool,
+        required=["role", "task"],
+    ))
+
+    return agent

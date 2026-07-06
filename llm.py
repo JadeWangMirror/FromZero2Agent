@@ -55,11 +55,13 @@ class LLMClient:
         base_url: str = "https://api.deepseek.com/anthropic",
         model: str = "deepseek-v4-pro",
         max_tokens: int = 4096,
+        temperature: float = 1.0,
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.max_tokens = max_tokens
+        self.temperature = temperature
 
     def send(
         self,
@@ -94,6 +96,7 @@ class LLMClient:
             "max_tokens": self.max_tokens,
             "messages": messages,
             "stream": True,
+            "temperature": self.temperature,
         }
         if tools:
             body["tools"] = tools
