@@ -26,6 +26,14 @@ SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 ACCENT = "#4493F8"
 ACCENT_DIM = "#1F6FEB"
 
+# 角色谱（刻意区分，避免全蓝分不清）：
+#   用户 YOU      = 蓝
+#   Agent MIRROR  = 橙（回复标签 + 回复左边框）
+#   处理中 Thinking = 琥珀
+COL_USER = "#58A6FF"
+COL_AGENT = "#F0883E"
+COL_WORK = "#D29922"
+
 # ── MIRROR Logo（蓝色渐变）─────────────────────────────────
 
 _MIRROR_RAW = r"""
@@ -258,7 +266,7 @@ class MirrorApp(App):
         height: auto;
         margin: 0;
         padding: 0 0 0 1;
-        border-left: solid #4493F8;
+        border-left: solid #F0883E;   /* agent 橙，与 | MIRROR 标签同色 */
     }
     MirrorMd > * { margin: 0; padding: 0; }
 
@@ -267,7 +275,7 @@ class MirrorApp(App):
         height: auto;
         margin: 0;
         padding: 0 0 0 1;
-        border-left: solid #4493F8;
+        border-left: solid #F0883E;
     }
 
     /* 思考区 */
@@ -909,7 +917,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
             return
 
         # 用户消息
-        self._mnt(Static(f"[bold #58A6FF]| YOU[/]  {text}"))
+        self._mnt(Static(f"[bold {COL_USER}]| YOU[/]  {text}"))
 
         # 思考区 — RichLog 增量追加，无额外间距
         self._think_box = VerticalScroll(classes="think-box")
@@ -937,7 +945,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         if self._spin:
             f = SPINNER[self._spin_idx % len(SPINNER)]
             self._spin_idx += 1
-            self._spin.update(f"[#4493F8]{f} Thinking...[/]")
+            self._spin.update(f"[{COL_WORK}]{f} Thinking...[/]")
         # spinner 周期内同步刷新状态条（用量/进度实时变化）
         self._refresh_status()
 
@@ -1024,7 +1032,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
 
     def _begin_stream(self) -> None:
         """第一个 text token 到达：挂载 MIRROR 标签 + 流式文本容器。"""
-        self._stream_label = Static("[bold #4493F8]| MIRROR[/]")
+        self._stream_label = Static(f"[bold {COL_AGENT}]| MIRROR[/]")
         self._stream_text = Static("", classes="stream-text")
         self._mnt(self._stream_label)
         self._mnt(self._stream_text)
@@ -1039,7 +1047,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         """流式结束：移除流式容器，挂载完整 Markdown 渲染。"""
         # 若未启动流式（极端情况，如纯工具无文本），仍挂标签
         if self._stream_label is None:
-            self._stream_label = Static("[bold #4493F8]| MIRROR[/]")
+            self._stream_label = Static(f"[bold {COL_AGENT}]| MIRROR[/]")
             self._mnt(self._stream_label)
         # 移除流式文本容器
         if self._stream_text:
