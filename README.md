@@ -1,6 +1,12 @@
 <div align="center">
-
-# MIRROR
+<pre>
+███╗   ███╗██╗██████╗ ██████╗  ██████╗ ██████╗
+████╗ ████║██║██╔══██╗██╔══██╗██╔═══██╗██╔══██╗
+██╔████╔██║██║██████╔╝██████╔╝██║   ██║██████╔╝
+██║╚██╔╝██║██║██╔══██╗██╔══██╗██║   ██║██╔══██╗
+██║ ╚═╝ ██║██║██║  ██║██║  ██║╚██████╔╝██║  ██║
+╚═╝     ╚═╝╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝
+</pre>
 
 **A self-evolving terminal agent that builds its own tools.**
 
@@ -12,7 +18,7 @@
 
 <div align="center">
 
-<img src="docs/screenshot.svg" alt="MIRROR TUI" width="100%">
+<img src="docs/MIRROR.png" alt="MIRROR TUI" width="100%">
 
 </div>
 
