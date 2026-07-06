@@ -12,6 +12,8 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.reactive import reactive
+from textual.widget import Widget
 from textual.widgets import Markdown, RichLog, Static, TextArea
 
 from agent import Agent, create_agent
@@ -78,6 +80,145 @@ EFFORT_LEVELS: dict[str, int | None] = {
 
 # 命令补全面板最多同时可见的行数；超出靠窗口滚动（▲/▼ 提示）
 PALETTE_MAX_VISIBLE = 6
+
+
+# ── 折叠式工具调用展示 ───────────────────────────────────────
+
+
+def _is_error_result(result: str) -> bool:
+    """与 tools.py 一致的失败启发式：结果以 error / tool execution error 开头。"""
+    r = str(result).lstrip().lower()
+    return r.startswith(("error", "tool execution error", "traceback"))
+
+
+class ToolCallBlock(Widget):
+    """一条工具调用的折叠展示：头行常驻（名称+截断参数+状态），点击展开看完整参数与结果。
+
+    仿 Claude Code：默认只露一行摘要，避免长调用过程刷屏；展开后参数/结果在带边框正文里滚动。
+    """
+
+    DEFAULT_CSS = """
+    ToolCallBlock {
+        height: auto;
+        margin: 0;
+        padding: 0 0 0 1;
+    }
+    ToolCallBlock .tc-head {
+        height: 1;
+        padding: 0;
+        color: #D2A8FF;
+    }
+    ToolCallBlock .tc-body {
+        height: auto;
+        max-height: 22;
+        margin: 0 0 0 3;
+        padding: 0 1;
+        border-left: solid #30363D;
+        color: #8B949E;
+        background: #0D1117;
+        overflow: auto;
+    }
+    """
+
+    collapsed = reactive(True)
+
+    def __init__(self, name: str, args: dict, role: str | None = None):
+        super().__init__()
+        self.tool_name = name
+        self.tool_args = args or {}
+        self.role = role
+        self.result: str | None = None
+        self.ok = True
+        self.done = False
+
+    # ── 文本工具 ──
+    @staticmethod
+    def _trunc(s: str, n: int) -> str:
+        s = str(s)
+        return s if len(s) <= n else s[:n] + "…"
+
+    @staticmethod
+    def _fmt_chars(n: int) -> str:
+        return f"{n / 1000:.1f}k chars" if n >= 1000 else f"{n} chars"
+
+    def _args_str(self, limit: int = 64) -> str:
+        parts = []
+        for k, v in self.tool_args.items():
+            if isinstance(v, str):
+                vs = f'"{self._trunc(v, 36)}"'
+            else:
+                vs = self._trunc(repr(v), 40)
+            parts.append(f"{k}={vs}")
+        return self._trunc(", ".join(parts), limit)
+
+    def _status(self) -> str:
+        if not self.done:
+            return "  [#FFA657]●[/][dim] running…[/]"
+        if not self.ok:
+            return "  [#F85149]✗[/][dim] error[/]"
+        n = len(self.result) if self.result else 0
+        return f"  [#3FB950]✓[/][dim] {self._fmt_chars(n)}[/]"
+
+    def _head_markup(self) -> str:
+        marker = "▸" if self.collapsed else "▾"
+        prefix = f"[{self.role}] " if self.role else ""
+        return (f"[#6E7681]{marker}[/] [bold #D2A8FF]{prefix}{self.tool_name}[/]"
+                f"  [dim]{self._args_str()}[/]{self._status()}")
+
+    def _body_markup(self) -> str:
+        lines = ["[bold #C9D1D9]arguments[/]"]
+        if self.tool_args:
+            for k, v in self.tool_args.items():
+                lines.append(f"  [dim]{k}:[/] {self._trunc(repr(v), 500)}")
+        else:
+            lines.append("  [dim](none)[/]")
+        if self.done:
+            lines.append("")
+            res = self.result or "(no output)"
+            lines.append(f"[bold #C9D1D9]result[/]  "
+                         f"[dim]({self._fmt_chars(len(res))})[/]")
+            lines.append(self._trunc(res, 4000))
+        else:
+            lines += ["", "[dim]… running[/]"]
+        return "\n".join(lines)
+
+    # ── 生命周期 ──
+    def compose(self) -> ComposeResult:
+        yield Static(self._head_markup(), classes="tc-head", markup=True)
+        yield Static(self._body_markup(), classes="tc-body", markup=True)
+
+    def on_mount(self) -> None:
+        self._apply()
+
+    def watch_collapsed(self, _v: bool) -> None:
+        self._apply()
+
+    def _apply(self) -> None:
+        """同步头行标记与正文显隐。"""
+        try:
+            self.query_one(".tc-head", Static).update(self._head_markup())
+            body = self.query_one(".tc-body", Static)
+            body.styles.display = "none" if self.collapsed else "block"
+        except Exception:
+            pass
+
+    def set_result(self, result: str) -> None:
+        """记录结果（worker 线程安全：只改数据，刷新由主线程 refresh_view 触发）。"""
+        self.result = str(result)
+        self.ok = not _is_error_result(result)
+        self.done = True
+
+    def refresh_view(self) -> None:
+        """主线程刷新头行+正文。"""
+        self._apply()
+        try:
+            self.query_one(".tc-body", Static).update(self._body_markup())
+        except Exception:
+            pass
+
+    def on_click(self, event) -> None:
+        event.stop()
+        self.collapsed = not self.collapsed
 
 
 # ── App ─────────────────────────────────────────────────────
@@ -220,6 +361,8 @@ class SparkApp(App):
         # 状态条：当前 ReAct 轮次
         self._turn = 0
         self._status: Static | None = None
+        # 本轮工具调用折叠块（按到达顺序；嵌套子 agent 调用也入栈）
+        self._tool_blocks: list[ToolCallBlock] = []
 
     # ── compose ──────────────────────────────────────────
 
@@ -760,6 +903,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         self._spin_timer = self.set_interval(0.08, self._tick)
 
         self._busy = True
+        self._tool_blocks = []
         self._run(text)
 
     def _tick(self) -> None:
@@ -795,31 +939,21 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
                 stream_buf.append(data["text"])
                 self.call_from_thread(self._stream_update, "".join(stream_buf))
 
-            elif ev == "tool_call":
-                a = ", ".join(f"{k}={v}" for k, v in data["args"].items())
-                self._mnt_t(Static(
-                    f"[bold #D2A8FF]  tool: {data['name']}[/] [dim]({a})[/]"
-                ))
+            elif ev in ("tool_call", "sub:tool_call"):
+                role = data.get("role") if ev.startswith("sub") else None
+                block = ToolCallBlock(
+                    data.get("name", "?"), data.get("args", {}), role=role)
+                self._tool_blocks.append(block)
+                self._mnt_t(block)
 
-            elif ev == "tool_result":
-                d = data["result"]
-                if len(d) > 500:
-                    d = d[:500] + "..."
-                self._mnt_t(Static(f"[#3FB950]  <- {d}[/]"))
-
-            elif ev == "sub:tool_call":
-                role = data.get("role", "?")
-                a = ", ".join(f"{k}={v}" for k, v in data["args"].items())
-                self._mnt_t(Static(
-                    f"[#D2A8FF]    [{role}] {data['name']}[/] [dim]({a})[/]"
-                ))
-
-            elif ev == "sub:tool_result":
-                role = data.get("role", "?")
-                d = str(data["result"])
-                if len(d) > 200:
-                    d = d[:200] + "..."
-                self._mnt_t(Static(f"[#3FB950]    [{role}] <- {d}[/]"))
+            elif ev in ("tool_result", "sub:tool_result"):
+                result = str(data.get("result", ""))
+                # 结果归到最近一个未完成的块（正确处理同轮多工具与子 agent 嵌套）
+                blk = next((b for b in reversed(self._tool_blocks)
+                            if not b.done), None)
+                if blk is not None:
+                    blk.set_result(result)
+                    self.call_from_thread(blk.refresh_view)
 
             elif ev.startswith("sub:"):
                 # 子 agent 的 thinking/text 不显示,避免刷屏
