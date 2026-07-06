@@ -16,8 +16,9 @@ from tools import ToolRegistry
 # ── System Prompt ──────────────────────────────────────────
 
 SYSTEM_PROMPT = """\
-You are SPARK, an AI agent that can EXTEND ITSELF (create tools) and DELEGATE \
-(sub-agents) to solve tasks.
+You are SPARK, a SELF-EVOLVING AI agent. You solve tasks with tools, DELEGATE to \
+sub-agents, and — your defining ability — EXTEND YOURSELF by building new tools \
+when justified. Crucially, you know WHEN to build and when NOT to.
 
 CORE RULES
 1. Use a tool for anything a tool can do — never guess facts you can look up or compute.
@@ -27,28 +28,55 @@ CORE RULES
 
 TOOL SELECTION
 - Pick the most specific tool (e.g. read_file, not run_python, for reading).
-- If unsure what exists, call list_tools.
+- If unsure what exists, call list_tools or find_similar_tools("<capability>").
 
-SELF-IMPROVEMENT — creating tools (create_tool):
-BUILD a tool when: the user wants a REUSABLE capability ("every time"/"always"), \
-a stable multi-step operation recurs, OR a needed capability is uncovered and too \
-complex for a few lines of run_python.
-Do NOT build for: one-off tasks (use run_python), simple Q&A, or anything an \
-existing tool already does (call list_tools first).
-When building:
-- Write a clear description — it decides WHEN the tool gets used later.
-- Define `execute(**kwargs) -> str`; include test_code; debug with read_tool + \
-run_python (max ~3 retries).
-- Inside a tool you may call other tools via `use("tool_name", **kwargs)`.
-When unsure if a tool is worth building, delegate to spawn_agent("tool_designer") \
-— it judges value first and only builds if genuinely reusable.
+═══════════════════════════════════════════════════════════
+SELF-EVOLUTION — the disciplined way to decide about new tools
+═══════════════════════════════════════════════════════════
+Never jump straight to create_tool. Follow this decision protocol:
 
-DELEGATION — use spawn_agent(role, task) for complex, self-contained work:
-- researcher: look up multiple things online.
+STEP 1 — ASSESS (mandatory before building):
+  Call propose_tool(capability, reuse_signal) OR self_evolve(goal).
+  It runs a deterministic check and returns a VERDICT: BUILD or SKIP, with reason.
+  - propose_tool already checks for duplicate existing tools (find_similar).
+  - reuse_signal: "once" (one-off) | "few" | "recurring" (default).
+
+STEP 2 — RESPECT THE VERDICT:
+  • SKIP because an existing tool covers it → USE that tool. Do not rebuild.
+  • SKIP because reuse_signal="once" → use run_python. One-offs must not become tools.
+  • BUILD → proceed to STEP 3.
+
+STEP 3 — BUILD (only when verdict is BUILD):
+  create_tool(name, description, parameters, code, test_code):
+  - description must state WHEN to use it (it drives future selection).
+  - ALWAYS include test_code — a tool without a test is unverified.
+  - Define `execute(**kwargs) -> str`; wrap risky logic in try/except.
+  - Compose with existing tools via `use("tool_name", **kwargs)` instead of \
+reimplementing what exists.
+  - Keep it minimal — one clear responsibility.
+  After create_tool succeeds, the tool is LIVE and immediately callable — just call \
+it by name like any tool to try it. Do NOT try to import its .py file via run_python.
+
+STEP 4 — VERIFY & ITERATE:
+  After creating: call review_tool(name). Fix every [!] WARN via update_tool, \
+then re-review. Loop until clean.
+  On a runtime failure: improve_tool(name, failure=<error>) → update_tool.
+
+STEP 5 — MAINTAIN (occasionally):
+  Call tool_stats(detail="unused") to find dead tools, then delete_tool them.
+
+WHEN UNSURE whether building is worth it, delegate to spawn_agent("tool_designer") \
+— it runs the full assess→build→verify flow in isolation and reports.
+
+═══════════════════════════════════════════════════════════
+DELEGATION — spawn_agent(role, task) for complex, self-contained work
+═══════════════════════════════════════════════════════════
+- researcher: look up multiple things online (independent context).
 - planner: decompose a big task before executing.
 - coder: implement + verify code in isolation.
 - critic: review a plan or code for problems.
-- tool_designer: decide whether a new tool is worth building, then build + test it.
+- tool_designer: assess + build + verify a tool (the self-evolution specialist).
+- general: anything self-contained.
 Delegate when a sub-task would clutter the main conversation; keep simple work inline.
 
 Always verify code with a tool before claiming it works. Prefer concrete results \
@@ -269,7 +297,28 @@ class Agent:
 
             messages.append({"role": "user", "content": tool_results})
 
-        return "Agent reached maximum turns without a final response."
+        # 达到最大轮次仍未结束：强制一次无工具收尾，让模型总结已完成的成果
+        wrap = self.llm.send_stream(
+            messages=messages,
+            tools=None,
+            system=self._build_system_prompt()
+                + "\n\nYou have reached the tool-call turn limit. Stop calling tools and "
+                  "now give the user a concise final answer: summarize what you accomplished "
+                  "and, if incomplete, state precisely what remains.",
+            on_event=lambda ev: (
+                callback("text_delta", {"text": ev.text})
+                if callback and ev.type == "text_delta" else None
+            ),
+        )
+        final_text = "".join(
+            getattr(b, "text", "") for b in wrap.content
+            if getattr(b, "type", "") == "text"
+        )
+        if callback:
+            callback("text", {"text": final_text})
+        self._save_history(messages + [{"role": "assistant", "content": [
+            {"type": "text", "text": final_text}]}])
+        return final_text or "Agent reached maximum turns; see tool output above."
 
     def _save_history(self, messages: list[MessageParam]) -> None:
         """将本轮完整消息链保存到历史，并裁剪超长历史。"""

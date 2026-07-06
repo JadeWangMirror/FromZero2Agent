@@ -114,7 +114,7 @@ def create_file_tools(base_dir: str | None = None) -> list[Tool]:
         return f"Error: not found: {full}"
 
     # ── glob (文件名模式匹配) ──────────────────────────────
-    def _glob(pattern: str, path: str = ".") -> str:
+    def _glob_files(pattern: str, path: str = ".") -> str:
         root = _resolve(base, path)
         full_pattern = os.path.join(root, pattern)
         matches = sorted(_glob.glob(full_pattern, recursive=True))
@@ -228,7 +228,7 @@ def create_file_tools(base_dir: str | None = None) -> list[Tool]:
         Tool("glob", "Find files by name pattern. Supports ** for recursion, e.g. '**/*.py'.",
              {"pattern": {"type": "string", "description": "e.g. '**/*.py' or 'src/*.js'"},
               "path": {"type": "string", "description": "root dir, default '.'"}},
-             _glob, required=["pattern"]),
+             _glob_files, required=["pattern"]),
         Tool("grep",
              "Search file contents with regex. Returns 'file:line: match'. "
              "Scans text files under path.",

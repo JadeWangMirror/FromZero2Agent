@@ -33,9 +33,9 @@ SPARK = """\
 
 def _welcome(model: str) -> str:
     return f"""\
-[#FF6B35]  SPARK Agent[/]      [dim]v1.0.0[/]
+[#FF6B35]  SPARK Agent[/]      [dim]v1.1.0  self-evolving[/]
 [dim]  model:[/] [bold]{model}[/]
-[dim]  tools:[/] [cyan]calculator[/] [dim]|[/] [cyan]get_current_time[/]
+[dim]  self-evolution:[/] [cyan]propose_tool[/][dim] → [/][cyan]create_tool[/][dim] → [/][cyan]review_tool[/]
 [dim]  help: [/][bold]Enter[/][dim] send  |  [/][bold]Ctrl+Q[/][dim] quit  |  [/][bold]Esc[/][dim] focus[/]"""
 
 # ── 斜杠命令清单（用于补全栏）──────────────────────────────
@@ -51,11 +51,12 @@ COMMANDS = [
     ("/save",    "save session  /save [path]"),
     ("/load",    "load session  /load <path>"),
     ("/tools",   "list all tools (built-in + self-made)"),
+    ("/stats",   "tool usage stats  /stats [all|unused|top]"),
     ("/quit",    "exit SPARK"),
 ]
 
 # 无参命令:Enter 直接执行而非补全
-_NO_ARG_COMMANDS = {"/help", "/clear", "/quit", "/tools", "/config"}
+_NO_ARG_COMMANDS = {"/help", "/clear", "/quit", "/tools", "/config", "/stats"}
 
 
 # ── App ─────────────────────────────────────────────────────
@@ -351,7 +352,7 @@ class SparkApp(App):
         if cmd in ("/help", "/?"):
             self._sys("commands: /model <name>  /temp <0-2>  /tokens <n>  "
                       "/system <text|reset>  /clear  /config [save]  "
-                      "/save [path]  /load <path>  /quit")
+                      "/save [path]  /load <path>  /tools  /stats [all|unused|top]  /quit")
 
         # /model <name>
         elif cmd == "/model" and arg and self._agent:
@@ -395,6 +396,19 @@ class SparkApp(App):
             if self._agent:
                 self._agent.reset_history()
                 self._sys("-- context cleared --")
+
+        # /tools — 列出全部工具（内置 + 自造）
+        elif cmd == "/tools" and self._agent:
+            if self._agent.toolforge:
+                out = self._agent.toolforge.list_tools()
+            else:
+                out = f"{len(self._agent.tools._tools)} tools registered"
+            self._sys(out)
+
+        # /stats — 工具使用统计
+        elif cmd == "/stats" and self._agent and self._agent.toolforge:
+            detail = arg or "all"
+            self._sys(self._agent.toolforge.usage_stats(detail=detail))
 
         # /config [save]
         elif cmd == "/config":
