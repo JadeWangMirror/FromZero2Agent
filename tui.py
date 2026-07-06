@@ -33,30 +33,48 @@ SPARK = """\
 
 def _welcome(model: str) -> str:
     return f"""\
-[#FF6B35]  SPARK Agent[/]      [dim]v1.1.0  self-evolving[/]
+[#FF6B35]  SPARK Agent[/]      [dim]v1.2.0  self-evolving[/]
 [dim]  model:[/] [bold]{model}[/]
 [dim]  self-evolution:[/] [cyan]propose_tool[/][dim] → [/][cyan]create_tool[/][dim] → [/][cyan]review_tool[/]
-[dim]  help: [/][bold]Enter[/][dim] send  |  [/][bold]Ctrl+Q[/][dim] quit  |  [/][bold]Esc[/][dim] focus[/]"""
+[dim]  new:[/] [bold]/effort · /context · /compact · /cost · /init · /models[/]
+[dim]  status bar below tracks context live  ·  [/][bold]/help[/][dim] for all commands[/]"""
 
 # ── 斜杠命令清单（用于补全栏）──────────────────────────────
 
 COMMANDS = [
-    ("/help",    "show available commands"),
-    ("/model",   "switch model  e.g. /model deepseek-chat"),
-    ("/temp",    "set temperature  e.g. /temp 0.7"),
-    ("/tokens",  "set max_tokens  e.g. /tokens 8192"),
-    ("/system",  "custom system prompt  /system reset"),
-    ("/clear",   "clear conversation context"),
-    ("/config",  "show config  (/config save to persist)"),
-    ("/save",    "save session  /save [path]"),
-    ("/load",    "load session  /load <path>"),
-    ("/tools",   "list all tools (built-in + self-made)"),
-    ("/stats",   "tool usage stats  /stats [all|unused|top]"),
-    ("/quit",    "exit SPARK"),
+    ("/help",     "show available commands"),
+    ("/model",    "switch model  e.g. /model deepseek-v4-flash"),
+    ("/models",   "list known models + context windows"),
+    ("/effort",   "reasoning depth  off|low|medium|high"),
+    ("/temp",     "set temperature  e.g. /temp 0.7"),
+    ("/tokens",   "set max_tokens  e.g. /tokens 8192"),
+    ("/system",   "custom system prompt  /system reset"),
+    ("/context",  "show context window usage"),
+    ("/compact",  "compress history now"),
+    ("/cost",     "token usage this session"),
+    ("/clear",    "clear conversation context"),
+    ("/init",     "write SPARK.md project context"),
+    ("/config",   "show config  (/config save to persist)"),
+    ("/save",     "save session  /save [path]"),
+    ("/load",     "load session  /load <path>"),
+    ("/tools",    "list all tools (built-in + self-made)"),
+    ("/stats",    "tool usage stats  /stats [all|unused|top]"),
+    ("/quit",     "exit SPARK"),
 ]
 
 # 无参命令:Enter 直接执行而非补全
-_NO_ARG_COMMANDS = {"/help", "/clear", "/quit", "/tools", "/config", "/stats"}
+_NO_ARG_COMMANDS = {
+    "/help", "/clear", "/quit", "/tools", "/config", "/stats",
+    "/cost", "/context", "/compact", "/models", "/init",
+}
+
+# /effort 等级 → thinking 预算（tokens）；None = 关闭扩展思考
+EFFORT_LEVELS: dict[str, int | None] = {
+    "off": None,
+    "low": 1024,
+    "medium": 4096,
+    "high": 12000,
+}
 
 
 # ── App ─────────────────────────────────────────────────────
@@ -125,6 +143,15 @@ class SparkApp(App):
         background: #0D1117;
     }
 
+    /* 动态状态条（输入框下方） */
+    #status-bar {
+        height: 1;
+        background: #161B22;
+        border-top: solid #30363D;
+        padding: 0 1;
+        color: #8B949E;
+    }
+
     #command-palette {
         display: none;
         height: auto;
@@ -187,6 +214,9 @@ class SparkApp(App):
         self._pal_visible = False
         self._pal_matches: list[tuple[str, str]] = []
         self._pal_idx = 0
+        # 状态条：当前 ReAct 轮次
+        self._turn = 0
+        self._status: Static | None = None
 
     # ── compose ──────────────────────────────────────────
 
@@ -194,7 +224,7 @@ class SparkApp(App):
         self._conv = VerticalScroll(id="conv")
         yield self._conv
 
-        # 输入区: 命令补全栏 + > 前缀 + TextArea
+        # 输入区: 命令补全栏 + > 前缀 + TextArea + 动态状态条
         with Vertical(id="input-area"):
             self._palette = Static("", id="command-palette")
             yield self._palette
@@ -207,6 +237,8 @@ class SparkApp(App):
                     show_line_numbers=False,
                 )
                 yield self._inp
+            self._status = Static("", id="status-bar")
+            yield self._status
 
     def on_mount(self) -> None:
         self.title = "SPARK"
@@ -223,6 +255,7 @@ class SparkApp(App):
         self._mnt(Static(_welcome(self._model), id="welcome-panel"))
         self._mnt(Static(f"[dim]config:[/] {self._cfg.summary() if self._cfg else self._model}"))
         self._mnt(Static("[dim]type [/][bold]/help[/][dim] for commands[/]"))
+        self._refresh_status()
         self._inp.focus()
 
     # ── helpers ──────────────────────────────────────────
@@ -233,6 +266,127 @@ class SparkApp(App):
 
     def _mnt_t(self, w) -> None:
         self.call_from_thread(self._mnt, w)
+
+    # ── 动态状态条 ───────────────────────────────────────
+
+    @staticmethod
+    def _fmt_tok(n: int) -> str:
+        """token 数值紧凑化：1.2k / 3.4M。"""
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1000:
+            return f"{n / 1000:.1f}k"
+        return str(n)
+
+    def _ctx_bar(self, ratio: float, width: int = 18) -> str:
+        """上下文进度条：填充率随阈值变色 绿→黄→红。"""
+        ratio = max(0.0, min(1.0, ratio))
+        filled = round(ratio * width)
+        color = "#F85149" if ratio >= 0.85 else (
+                "#D29922" if ratio >= 0.6 else "#3FB950")
+        filled_part = f"[{color}]{'━' * filled}[/]" if filled else ""
+        empty_part = (f"[#30363D]{'━' * (width - filled)}[/]"
+                      if width - filled else "")
+        return filled_part + empty_part
+
+    def _build_status(self) -> str:
+        """构造单行动态状态条 markup。"""
+        a = self._agent
+        if not a or not self._status:
+            return ""
+        llm = a.llm
+        ratio = llm.context_ratio()
+        pct = int(ratio * 100)
+        pct_color = ("#F85149" if ratio >= 0.85
+                     else "#D29922" if ratio >= 0.6 else "#3FB950")
+        bar = self._ctx_bar(ratio)
+        cur = self._fmt_tok(llm.last["input"])
+        win = self._fmt_tok(llm.context_window)
+        u = llm.usage
+        up, down = self._fmt_tok(u["input"]), self._fmt_tok(u["output"])
+        cache = u["cache_read"] + u["cache_creation"]
+        cache_seg = (f"  [dim]·[/] [dim]cache[/] [#56D4DD]"
+                     f"{self._fmt_tok(cache)}[/]") if cache else ""
+        ntools = len(a.tools._tools) if a.tools else 0
+        turn = self._turn
+        # effort 标记
+        effort = next((k for k, v in EFFORT_LEVELS.items()
+                       if v == llm.thinking_budget), "off")
+        effort_seg = "" if effort == "off" else f"  [dim]·[/] [#FFA657]effort {effort}[/]"
+        return (
+            f"[dim]ctx[/] {bar} [{pct_color}]{pct:>3}%[/]"
+            f"  [dim]{cur}/{win}[/]"
+            f"  [dim]│[/]  [dim]↑[/][#58A6FF]{up}[/]"
+            f" [dim]↓[/][#7EE787]{down}[/]"
+            f"  [dim]·[/] [dim]{u['calls']} calls[/]{cache_seg}{effort_seg}"
+            f"  [dim]│[/]  [#D2A8FF]{ntools} tools[/]"
+            f"  [dim]│[/]  [dim]turn[/] [#FFA657]{turn}/{a.max_turns}[/]"
+        )
+
+    def _refresh_status(self) -> None:
+        """刷新底部状态条（主线程安全调用）。"""
+        if self._status:
+            try:
+                self._status.update(self._build_status())
+            except Exception:
+                pass
+
+    def _refresh_status_t(self) -> None:
+        """从 worker 线程刷新状态条。"""
+        self.call_from_thread(self._refresh_status)
+
+    def _write_init_md(self) -> str:
+        """扫描当前仓库，生成 SPARK.md 项目上下文文件。"""
+        import glob
+        py_files = sorted(
+            os.path.basename(p) for p in glob.glob("*.py")
+            if not p.startswith("_")
+        )
+        model = self._model
+        cfg_line = (self._cfg.summary() if self._cfg
+                    else f"model={model}")
+        tool_list = ""
+        if self._agent and self._agent.toolforge:
+            tool_list = self._agent.toolforge.list_tools()
+        body = f"""# SPARK.md — Project Context
+
+> Auto-generated by `/init`. SPARK loads this to understand the project.
+
+## What this is
+SPARK Agent — a self-evolving terminal agent (Anthropic-protocol LLM +
+tool system + self-evolution via ToolForge). Python + [Textual](https://textual.textualize.io) TUI.
+
+## Modules
+{chr(10).join(f"- `{f}`" for f in py_files)}
+
+- `agent.py` — ReAct loop, streaming, history, hierarchical sub-agents.
+- `tui.py` — Textual TUI (conversation + dynamic status bar + slash commands).
+- `llm.py` — LLM client (httpx SSE streaming, retry, usage tracking).
+- `tools.py` / `filetools.py` / `webtools.py` — built-in tool registries.
+- `toolforge.py` — self-evolution engine (propose/create/review/improve tools).
+- `subagents.py` — specialized sub-agent prompts (researcher, coder, …).
+- `config.py` — config.json + env loading.
+
+## Runtime
+- model: `{model}`
+- {cfg_line}
+- launch: `python main.py` (or double-click `run.bat`)
+
+## Slash commands
+`/model` `/models` `/effort` `/temp` `/tokens` `/system` `/context`
+`/compact` `/cost` `/clear` `/init` `/config` `/save` `/load` `/tools`
+`/stats` `/help` `/quit`
+
+## Registered tools
+{tool_list or "(agent not initialized)"}
+"""
+        path = "SPARK.md"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+            return f"wrote {path} ({len(body)} bytes)"
+        except OSError as e:
+            return f"x failed to write SPARK.md: {e}"
 
     # ── input ────────────────────────────────────────────
 
@@ -350,18 +504,74 @@ class SparkApp(App):
 
         # /help
         if cmd in ("/help", "/?"):
-            self._sys("commands: /model <name>  /temp <0-2>  /tokens <n>  "
-                      "/system <text|reset>  /clear  /config [save]  "
-                      "/save [path]  /load <path>  /tools  /stats [all|unused|top]  /quit")
+            self._sys("model:   /model <name>  /models  /effort <off|low|medium|high>  "
+                      "/temp <0-2>  /tokens <n>  /system <text|reset>")
+            self._sys("context: /context  /compact  /cost  /clear")
+            self._sys("session: /config [save]  /save [path]  /load <path>  /init  "
+                      "/tools  /stats [all|unused|top]  /quit")
 
         # /model <name>
         elif cmd == "/model" and arg and self._agent:
+            from llm import LLMClient
+            known = list(LLMClient.CONTEXT_WINDOWS)
+            warn = ""
+            if arg not in LLMClient.CONTEXT_WINDOWS:
+                warn = (f"  [dim](unknown model; valid: "
+                        f"{', '.join(known)})[/]")
             self._agent.llm.model = arg
+            self._agent.llm.context_window = LLMClient.window_for(arg)
             self._model = arg
             if self._cfg:
                 self._cfg.model = arg
             self.sub_title = arg
-            self._sys(f"model -> {arg}")
+            self._sys(f"model -> {arg}{warn}")
+            self._refresh_status()
+
+        # /models — 列出已知模型 + 上下文窗口
+        elif cmd == "/models":
+            from llm import LLMClient
+            cur = self._agent.llm.model if self._agent else self._model
+            lines = ["[dim]known models:[/]"]
+            for m, w in LLMClient.CONTEXT_WINDOWS.items():
+                mark = "[#3FB950]●[/] " if m == cur else "[dim]○[/] "
+                lines.append(f"  {mark}[bold]{m}[/]  [dim]{w//1000}k ctx[/]")
+            lines.append(f"[dim]default (unknown): {LLMClient._DEFAULT_WINDOW//1000}k[/]")
+            self._sys("\n".join(lines))
+
+        # /effort <off|low|medium|high> — 扩展思考预算
+        elif cmd == "/effort" and self._agent:
+            if not arg:
+                cur = next((k for k, v in EFFORT_LEVELS.items()
+                            if v == self._agent.llm.thinking_budget), "off")
+                self._sys(f"effort -> {cur}  "
+                          f"[dim](off|low|medium|high)[/]")
+            elif arg.lower() in EFFORT_LEVELS:
+                self._agent.llm.thinking_budget = EFFORT_LEVELS[arg.lower()]
+                self._sys(f"effort -> {arg.lower()}")
+                self._refresh_status()
+            else:
+                self._sys(f"x /effort: {', '.join(EFFORT_LEVELS)}")
+
+        # /temp <value>
+        elif cmd == "/temp" and arg and self._agent:
+            try:
+                v = float(arg)
+                self._agent.llm.temperature = v
+                if self._cfg:
+                    self._cfg.temperature = v
+                self._sys(f"temperature -> {v}")
+                self._refresh_status()
+            except ValueError:
+                self._sys("x /temp needs a number, e.g. /temp 0.7")
+
+        # /tokens <n>
+        elif cmd == "/tokens" and arg and self._agent:
+            try:
+                self._agent.llm.max_tokens = int(arg)
+                self._sys(f"max_tokens -> {arg}")
+                self._refresh_status()
+            except ValueError:
+                self._sys("x /tokens needs an integer")
 
         # /temp <value>
         elif cmd == "/temp" and arg and self._agent:
@@ -391,11 +601,52 @@ class SparkApp(App):
                 self._agent.system_prompt = arg
                 self._sys(f"system prompt set ({len(arg)} chars)")
 
+        # /context — 上下文窗口占用详情
+        elif cmd == "/context" and self._agent:
+            llm = self._agent.llm
+            ratio = llm.context_ratio()
+            info = self._agent.context_info()
+            pct = f"{ratio*100:.1f}%"
+            bar = self._ctx_bar(ratio, 24)
+            self._sys(
+                f"{bar}\n"
+                f"  [dim]window:[/] {self._fmt_tok(llm.context_window)}  "
+                f"[dim]last request:[/] {self._fmt_tok(llm.last['input'])} "
+                f"([bold]{pct}[/])  "
+                f"[dim]reply:[/] {self._fmt_tok(llm.last['output'])}\n"
+                f"  [dim]history:[/] {info['messages']} msgs  "
+                f"{self._fmt_tok(info['chars'])} chars  "
+                f"[dim]auto-compact @[/] {self._fmt_tok(info['threshold'])}"
+            )
+
+        # /compact — 立即压缩历史
+        elif cmd == "/compact" and self._agent:
+            before, after = self._agent.compact()
+            self._sys(f"compressed: {before} -> {after} messages")
+            self._refresh_status()
+
+        # /cost — 本次会话累计用量
+        elif cmd == "/cost" and self._agent:
+            u = self._agent.llm.usage
+            total = u["input"] + u["output"]
+            cache = u["cache_read"] + u["cache_creation"]
+            self._sys(
+                f"  [dim]input[/]   {self._fmt_tok(u['input'])}\n"
+                f"  [dim]output[/]  {self._fmt_tok(u['output'])}\n"
+                f"  [dim]total[/]   {self._fmt_tok(total)}  "
+                f"[dim]across[/] {u['calls']} calls\n"
+                + (f"  [dim]cache[/]   {self._fmt_tok(cache)} "
+                   f"[dim](read {self._fmt_tok(u['cache_read'])} + "
+                   f"write {self._fmt_tok(u['cache_creation'])})[/]"
+                   if cache else "")
+            )
+
         # /clear
         elif cmd == "/clear":
             if self._agent:
                 self._agent.reset_history()
                 self._sys("-- context cleared --")
+                self._refresh_status()
 
         # /tools — 列出全部工具（内置 + 自造）
         elif cmd == "/tools" and self._agent:
@@ -409,6 +660,10 @@ class SparkApp(App):
         elif cmd == "/stats" and self._agent and self._agent.toolforge:
             detail = arg or "all"
             self._sys(self._agent.toolforge.usage_stats(detail=detail))
+
+        # /init — 生成项目上下文文件 SPARK.md
+        elif cmd == "/init":
+            self._sys(self._write_init_md())
 
         # /config [save]
         elif cmd == "/config":
@@ -489,6 +744,8 @@ class SparkApp(App):
             f = SPINNER[self._spin_idx % len(SPINNER)]
             self._spin_idx += 1
             self._spin.update(f"[#FF6B35]{f} Thinking...[/]")
+        # spinner 周期内同步刷新状态条（用量/进度实时变化）
+        self._refresh_status()
 
     # ── agent worker ─────────────────────────────────────
 
@@ -502,6 +759,10 @@ class SparkApp(App):
             if ev == "thinking":
                 think_buf.append(data["text"])
                 self.call_from_thread(self._set_think, "".join(think_buf))
+
+            elif ev == "turn":
+                self._turn = data.get("turn", self._turn)
+                self._refresh_status_t()
 
             elif ev == "text_delta":
                 # 第一个 token 到达时初始化流式容器
@@ -572,6 +833,8 @@ class SparkApp(App):
         if not self._has_think and self._think_box:
             self._think_box.remove()
             self._think_box = None
+        self._turn = 0
+        self._refresh_status()
 
     # ── 流式最终回复 ───────────────────────────────────────
 

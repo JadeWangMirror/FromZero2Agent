@@ -192,6 +192,23 @@ class Agent:
         """清空对话历史。"""
         self._history.clear()
 
+    def compact(self) -> tuple[int, int]:
+        """手动触发上下文压缩。返回 (压缩前消息数, 压缩后消息数)。"""
+        before = len(self._history)
+        self._maybe_compress(force=True)
+        return before, len(self._history)
+
+    def context_info(self) -> dict:
+        """返回当前上下文规模信息（供状态条/命令使用）。"""
+        msgs = self._history
+        chars = sum(self._msg_size(m) for m in msgs)
+        return {
+            "messages": len(msgs),
+            "chars": chars,
+            "max_history": self._max_history,
+            "threshold": self._compress_threshold,
+        }
+
     def export_history(self) -> list[dict]:
         """导出对话历史为可序列化列表（用于持久化）。"""
         return [dict(m) for m in self._history]
@@ -221,6 +238,8 @@ class Agent:
         tool_params = self.tools.to_params() if self.tools else None
 
         for _turn in range(self.max_turns):
+            if callback:
+                callback("turn", {"turn": _turn + 1, "max": self.max_turns})
             # ── 流式调用 + 实时回调 ──
             def on_stream(ev: StreamEvent) -> None:
                 if ev.type == "thinking_delta" and callback:
@@ -331,12 +350,12 @@ class Agent:
 
     # ── 上下文自动压缩 ─────────────────────────────────────
 
-    def _maybe_compress(self) -> None:
+    def _maybe_compress(self, force: bool = False) -> None:
         """历史过大时，把旧消息摘要化，保留最近几轮原文。"""
         if len(self._history) <= self._keep_recent + 2:
             return
         total = sum(self._msg_size(m) for m in self._history)
-        if total < self._compress_threshold:
+        if not force and total < self._compress_threshold:
             return
         old = self._history[:-self._keep_recent]
         recent = self._history[-self._keep_recent:]

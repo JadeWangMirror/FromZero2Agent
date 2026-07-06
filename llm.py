@@ -50,6 +50,20 @@ class _SimpleBlock:
 class LLMClient:
     """Anthropic 协议 LLM 客户端，用 httpx 处理 SSE 流。"""
 
+    # 各模型上下文窗口（tokens）；未命中则取默认值
+    CONTEXT_WINDOWS: dict[str, int] = {
+        "deepseek-v4-pro": 128_000,
+        "deepseek-v4-flash": 128_000,
+        "deepseek-chat": 64_000,
+        "deepseek-reasoner": 64_000,
+    }
+    _DEFAULT_WINDOW = 128_000
+
+    @classmethod
+    def window_for(cls, model: str) -> int:
+        """按模型名查上下文窗口，未知模型回退到默认值。"""
+        return cls.CONTEXT_WINDOWS.get(model, cls._DEFAULT_WINDOW)
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -65,12 +79,22 @@ class LLMClient:
         self.temperature = temperature
         self.max_retries = 3
         self.retry_backoff = 1.0
+        # 思考预算（extended thinking）；None = 不发送 thinking 字段
+        self.thinking_budget: int | None = None
+        # 累计 token 用量（跨本次进程所有调用）
+        self.usage = {"input": 0, "output": 0, "calls": 0,
+                      "cache_read": 0, "cache_creation": 0}
+        # 最近一次主对话请求的规模（驱动上下文进度条）
+        self.last = {"input": 0, "output": 0}
+        # 当前模型上下文窗口
+        self.context_window = self.window_for(model)
 
     def send(
         self,
         messages: list[MessageParam],
         tools: list[ToolParam] | None = None,
         system: str | None = None,
+        thinking_budget: int | None = ...,
     ) -> Message:
         """非流式发送（带重试，供摘要等内部调用）。"""
         import anthropic
@@ -78,9 +102,14 @@ class LLMClient:
         kwargs: dict = {
             "model": self.model,
             "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
             "messages": messages,
         }
+        # 非流式不传 temperature（与 thinking 冲突时由 API 决定）
+        tb = self.thinking_budget if thinking_budget is ... else thinking_budget
+        if tb:
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": tb}
+        else:
+            kwargs["temperature"] = self.temperature
         if tools:
             kwargs["tools"] = tools
         if system:
@@ -88,7 +117,9 @@ class LLMClient:
         last_exc: Exception | None = None
         for attempt in range(self.max_retries):
             try:
-                return client.messages.create(**kwargs)
+                resp = client.messages.create(**kwargs)
+                self._tally(resp.usage)
+                return resp
             except anthropic.APIStatusError as e:
                 code = getattr(e, "status_code", 0)
                 if code == 429 or code >= 500 and attempt < self.max_retries - 1:
@@ -105,21 +136,55 @@ class LLMClient:
         assert last_exc is not None
         raise last_exc
 
+    def _tally(self, usage) -> None:
+        """把单次响应的 usage 累计到 self.usage。"""
+        if usage is None:
+            return
+        self.usage["input"] += getattr(usage, "input_tokens", 0) or 0
+        self.usage["output"] += getattr(usage, "output_tokens", 0) or 0
+        self.usage["cache_read"] += getattr(usage, "cache_read_input_tokens", 0) or 0
+        self.usage["cache_creation"] += getattr(usage, "cache_creation_input_tokens", 0) or 0
+        self.usage["calls"] += 1
+
+    def reset_usage(self) -> None:
+        for k in self.usage:
+            self.usage[k] = 0
+        self.last = {"input": 0, "output": 0}
+
+    def context_ratio(self) -> float:
+        """当前上下文占窗口的比例（0~1），驱动进度条。"""
+        if self.context_window <= 0:
+            return 0.0
+        return min(1.0, self.last["input"] / self.context_window)
+
+    def usage_summary(self) -> str:
+        u = self.usage
+        cache = u["cache_read"] + u["cache_creation"]
+        return (f"calls={u['calls']}  in={u['input']}  out={u['output']}  "
+                f"total={u['input'] + u['output']}"
+                + (f"  (cache={cache})" if cache else ""))
+
     def send_stream(
         self,
         messages: list[MessageParam],
         tools: list[ToolParam] | None = None,
         system: str | None = None,
         on_event: StreamCallback | None = None,
+        thinking_budget: int | None = ...,
     ) -> _SimpleMsg:
         """流式发送，httpx 直连 SSE，实时回调 on_event。带重试。"""
+        tb = self.thinking_budget if thinking_budget is ... else thinking_budget
         body: dict = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "messages": messages,
             "stream": True,
-            "temperature": self.temperature,
         }
+        if tb:
+            # 开启思考时不能同时传 temperature（Anthropic 协议限制）
+            body["thinking"] = {"type": "enabled", "budget_tokens": tb}
+        else:
+            body["temperature"] = self.temperature
         if tools:
             body["tools"] = tools
         if system:
@@ -182,6 +247,15 @@ class LLMClient:
                 # ── message_start ──
                 if etype == "message_start":
                     blocks = []
+                    u = event.get("message", {}).get("usage", {})
+                    if u:
+                        it = u.get("input_tokens", 0) or 0
+                        self.usage["input"] += it
+                        self.last["input"] = it          # 本次请求上下文规模
+                        cr = u.get("cache_read_input_tokens", 0) or 0
+                        cc = u.get("cache_creation_input_tokens", 0) or 0
+                        self.usage["cache_read"] += cr
+                        self.usage["cache_creation"] += cc
 
                 # ── content_block_start ──
                 elif etype == "content_block_start":
@@ -247,8 +321,14 @@ class LLMClient:
                     pass
 
                 # ── message_delta / message_stop ──
-                elif etype in ("message_delta", "message_stop"):
-                    pass
+                elif etype == "message_delta":
+                    u = event.get("usage", {})
+                    if u:
+                        ot = u.get("output_tokens", 0) or 0
+                        self.usage["output"] += ot
+                        self.last["output"] = ot       # 本次回复产出量
+                elif etype == "message_stop":
+                    self.usage["calls"] += 1
 
         # 过滤掉 thinking blocks（只保留 text + tool_use 给 agent）
         final_blocks = [
