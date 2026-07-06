@@ -281,14 +281,14 @@ class SparkApp(App):
             return f"{n / 1000:.1f}k"
         return str(n)
 
-    def _ctx_bar(self, ratio: float, width: int = 18) -> str:
-        """上下文进度条：填充率随阈值变色 绿→黄→红。"""
+    def _ctx_bar(self, ratio: float, width: int = 24) -> str:
+        """上下文进度条：填充随阈值变色 绿→黄→红；空段用浅 shade 始终可见。"""
         ratio = max(0.0, min(1.0, ratio))
         filled = round(ratio * width)
         color = "#F85149" if ratio >= 0.85 else (
                 "#D29922" if ratio >= 0.6 else "#3FB950")
-        filled_part = f"[{color}]{'━' * filled}[/]" if filled else ""
-        empty_part = (f"[#30363D]{'━' * (width - filled)}[/]"
+        filled_part = f"[{color} bold]{'█' * filled}[/]" if filled else ""
+        empty_part = (f"[#30363D]{'░' * (width - filled)}[/]"
                       if width - filled else "")
         return filled_part + empty_part
 
@@ -298,12 +298,13 @@ class SparkApp(App):
         if not a or not self._status:
             return ""
         llm = a.llm
-        ratio = llm.context_ratio()
+        used = a.context_tokens()
+        ratio = (used / llm.context_window) if llm.context_window else 0.0
         pct = int(ratio * 100)
         pct_color = ("#F85149" if ratio >= 0.85
                      else "#D29922" if ratio >= 0.6 else "#3FB950")
         bar = self._ctx_bar(ratio)
-        cur = self._fmt_tok(llm.last["input"])
+        cur = self._fmt_tok(used)
         win = self._fmt_tok(llm.context_window)
         u = llm.usage
         up, down = self._fmt_tok(u["input"]), self._fmt_tok(u["output"])
@@ -622,15 +623,19 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         # /context — 上下文窗口占用详情
         elif cmd == "/context" and self._agent:
             llm = self._agent.llm
-            ratio = llm.context_ratio()
+            used = self._agent.context_tokens()
+            ratio = (used / llm.context_window) if llm.context_window else 0.0
             info = self._agent.context_info()
+            est = self._agent.estimate_context_tokens()
             pct = f"{ratio*100:.1f}%"
-            bar = self._ctx_bar(ratio, 24)
+            bar = self._ctx_bar(ratio, 28)
             self._sys(
                 f"{bar}\n"
                 f"  [dim]window:[/] {self._fmt_tok(llm.context_window)}  "
-                f"[dim]last request:[/] {self._fmt_tok(llm.last['input'])} "
-                f"([bold]{pct}[/])  "
+                f"[dim]in use:[/] [bold]{self._fmt_tok(used)}[/] "
+                f"([bold]{pct}[/])\n"
+                f"  [dim]last request:[/] {self._fmt_tok(llm.last['input'])}  "
+                f"[dim]estimate:[/] ~{self._fmt_tok(est)}  "
                 f"[dim]reply:[/] {self._fmt_tok(llm.last['output'])}\n"
                 f"  [dim]history:[/] {info['messages']} msgs  "
                 f"{self._fmt_tok(info['chars'])} chars  "

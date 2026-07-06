@@ -209,6 +209,18 @@ class Agent:
             "threshold": self._compress_threshold,
         }
 
+    def estimate_context_tokens(self) -> int:
+        """估算即将发送的上下文 token 数：system(含工具表)+历史，~4 字符/token。"""
+        sys_chars = len(self._build_system_prompt())
+        hist_chars = sum(self._msg_size(m) for m in self._history)
+        return (sys_chars + hist_chars) // 4
+
+    def context_tokens(self) -> int:
+        """当前上下文占用（token）：取「最近一次实际用量」与「实时估算」的较大值，
+        保证进度条在请求前后、历史增长时都持续反映真实占用。"""
+        actual = getattr(self.llm, "last", {}).get("input", 0) if self.llm else 0
+        return max(actual or 0, self.estimate_context_tokens())
+
     def export_history(self) -> list[dict]:
         """导出对话历史为可序列化列表（用于持久化）。"""
         return [dict(m) for m in self._history]
