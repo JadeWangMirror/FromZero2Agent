@@ -1,5 +1,5 @@
 """
-TUI — SPARK Agent，类 Claude Code 终端界面。
+TUI — MIRROR Agent，类 Claude Code 终端界面。
 """
 
 from __future__ import annotations
@@ -22,24 +22,28 @@ from agent import Agent, create_agent
 
 SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-# ── SPARK Logo ─────────────────────────────────────────────
+# 主色：MIRROR 蓝
+ACCENT = "#4493F8"
+ACCENT_DIM = "#1F6FEB"
 
-SPARK = """\
-  [bold #FF6B35]███████╗██████╗  █████╗ ██████╗ ██╗  ██╗[/]
-  [bold #FF8C5A]██╔════╝██╔══██╗██╔══██╗██╔══██╗██║ ██╔╝[/]
-  [bold #FFAA77]███████╗██████╔╝███████║██████╔╝█████╔╝[/]
-  [bold #FFC8A0]╚════██║██╔═══╝ ██╔══██║██╔══██╗██╔═██╗[/]
-  [bold #FFD5B8]███████║██║     ██║  ██║██║  ██║██║  ██╗[/]
-  [bold #FFE8D5]╚══════╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝[/]"""
+# ── MIRROR Logo（蓝色渐变）─────────────────────────────────
+
+MIRROR = """\
+  [bold #1F6FEB]███╗   ███╗██████╗██████╗ ██████╗ ██╗███████╗███████╗[/]
+  [bold #2F80ED]████╗ ████║██╔══██╗██╔══██╗██╔═══╝ ██║██╔════╝██╔════╝[/]
+  [bold #4493F8]██╔████╔██║██████╔╝██████╔╝██║  ███╗██║█████╗  ███████╗[/]
+  [bold #5AA9F6]██║╚██╔╝██║██╔══██╗██╔══██╗██║  ██║██║██╔══╝  ╚════██║[/]
+  [bold #79C0FF]██║ ╚═╝ ██║██████╔╝██████╔╝╚██████╔╝██║███████╗███████║[/]
+  [bold #A5D6FF]╚═╝     ╚═╝╚═════╝ ╚═════╝  ╚═════╝ ╚═╝╚══════╝╚══════╝[/]"""
 
 
 def _welcome(model: str) -> str:
     return f"""\
-[#FF6B35]  SPARK Agent[/]      [dim]v1.2.0  self-evolving[/]
+[{ACCENT}]  MIRROR Agent[/]      [dim]v2.0.0  self-evolving[/]
 [dim]  model:[/] [bold]{model}[/]
 [dim]  self-evolution:[/] [cyan]propose_tool[/][dim] → [/][cyan]create_tool[/][dim] → [/][cyan]review_tool[/]
 [dim]  new:[/] [bold]/effort · /context · /compact · /cost · /init · /models[/]
-[dim]  status bar below tracks context live  ·  [/][bold]/help[/][dim] for all commands[/]"""
+[dim]  live context bar below the input  ·  [/][bold]/help[/][dim] for all commands[/]"""
 
 # ── 斜杠命令清单（用于补全栏）──────────────────────────────
 
@@ -55,13 +59,13 @@ COMMANDS = [
     ("/compact",  "compress history now"),
     ("/cost",     "token usage this session"),
     ("/clear",    "clear conversation context"),
-    ("/init",     "write SPARK.md project context"),
+    ("/init",     "write MIRROR.md project context"),
     ("/config",   "show config  (/config save to persist)"),
     ("/save",     "save session  /save [path]"),
     ("/load",     "load session  /load <path>"),
     ("/tools",    "list all tools (built-in + self-made)"),
     ("/stats",    "tool usage stats  /stats [all|unused|top]"),
-    ("/quit",     "exit SPARK"),
+    ("/quit",     "exit MIRROR"),
 ]
 
 # 无参命令:Enter 直接执行而非补全
@@ -224,8 +228,8 @@ class ToolCallBlock(Widget):
 # ── App ─────────────────────────────────────────────────────
 
 
-class SparkApp(App):
-    """SPARK Agent TUI."""
+class MirrorApp(App):
+    """MIRROR Agent TUI."""
 
     CSS = """
     Screen { background: #0D1117; }
@@ -242,24 +246,24 @@ class SparkApp(App):
         height: auto;
         margin: 1 0;
         padding: 1;
-        border: solid #FF6B35;
+        border: solid #4493F8;
     }
 
     /* Agent markdown — 紧凑行距，消除内部组件默认间距 */
-    SparkMd {
+    MirrorMd {
         height: auto;
         margin: 0;
         padding: 0 0 0 1;
-        border-left: solid #FF6B35;
+        border-left: solid #4493F8;
     }
-    SparkMd > * { margin: 0; padding: 0; }
+    MirrorMd > * { margin: 0; padding: 0; }
 
     /* 流式最终回复（渲染中） */
     .stream-text {
         height: auto;
         margin: 0;
         padding: 0 0 0 1;
-        border-left: solid #FF6B35;
+        border-left: solid #4493F8;
     }
 
     /* 思考区 */
@@ -281,19 +285,23 @@ class SparkApp(App):
     #input-area {
         dock: bottom;
         height: auto;
-        max-height: 40vh;
+        max-height: 45vh;
         border-top: solid #30363D;
         padding: 0 1 0 1;
         background: #0D1117;
     }
 
-    /* 动态状态条（输入框下方） */
-    #status-bar {
-        height: 1;
-        background: #161B22;
-        border-top: solid #30363D;
+    /* 输入框：带边框 + 聚焦蓝光 */
+    #input-row {
+        height: auto;
+        border: solid #30363D;
+        background: #0D1117;
         padding: 0 1;
-        color: #8B949E;
+        margin: 0;
+    }
+    #input-row:focus-within {
+        border: solid #4493F8;
+        background: #0F1620;
     }
 
     #command-palette {
@@ -301,20 +309,17 @@ class SparkApp(App):
         height: auto;
         max-height: 9;                   /* 6 可见 + ▲/▼ + 边框，绝不遮输入框 */
         background: #161B22;
-        border: solid #30363D;
+        border: solid #4493F8;
         border-bottom: none;
         padding: 0 1;
+        margin: 0 0 1 0;
         overflow: hidden;                /* 内容由 _render_palette 窗口化裁切 */
     }
     #command-palette.visible { display: block; }
 
-    #input-row {
-        height: auto;
-    }
-
     #input-prefix {
         width: 2;
-        color: #FF6B35;
+        color: #4493F8;
         padding: 0;
     }
 
@@ -324,11 +329,20 @@ class SparkApp(App):
         min-height: 1;
         max-height: 20;
         border: none;
-        background: #0D1117;
+        background: transparent;
         color: #E6EDF3;
         padding: 0;
     }
     #user-input:focus { border: none; }
+
+    /* 动态状态条：两行——大进度条 + 紧凑指标 */
+    #status-bar {
+        height: 2;
+        background: #161B22;
+        border-top: solid #30363D;
+        padding: 0 1;
+        color: #8B949E;
+    }
     """
 
     BINDINGS = [
@@ -375,7 +389,7 @@ class SparkApp(App):
             self._palette = Static("", id="command-palette")
             yield self._palette
             with Horizontal(id="input-row"):
-                yield Static("[bold #FF6B35]>[/]", id="input-prefix")
+                yield Static("[bold #4493F8]>[/]", id="input-prefix")
                 self._inp = TextArea(
                     "",
                     id="user-input",
@@ -387,7 +401,7 @@ class SparkApp(App):
             yield self._status
 
     def on_mount(self) -> None:
-        self.title = "SPARK"
+        self.title = "MIRROR"
         self.sub_title = self._model
 
         try:
@@ -397,12 +411,16 @@ class SparkApp(App):
             return
 
         # 启动画面
-        self._mnt(Static(SPARK))
+        self._mnt(Static(MIRROR))
         self._mnt(Static(_welcome(self._model), id="welcome-panel"))
         self._mnt(Static(f"[dim]config:[/] {self._cfg.summary() if self._cfg else self._model}"))
         self._mnt(Static("[dim]type [/][bold]/help[/][dim] for commands[/]"))
         self._refresh_status()
         self._inp.focus()
+
+    def on_resize(self, event) -> None:
+        """终端尺寸变化时重绘自适应进度条。"""
+        self._refresh_status()
 
     # ── helpers ──────────────────────────────────────────
 
@@ -436,7 +454,7 @@ class SparkApp(App):
         return filled_part + empty_part
 
     def _build_status(self) -> str:
-        """构造单行动态状态条 markup。"""
+        """构造两行动态状态条：第一行=醒目进度条(自适应宽度)，第二行=紧凑指标。"""
         a = self._agent
         if not a or not self._status:
             return ""
@@ -446,7 +464,13 @@ class SparkApp(App):
         pct = int(ratio * 100)
         pct_color = ("#F85149" if ratio >= 0.85
                      else "#D29922" if ratio >= 0.6 else "#3FB950")
-        bar = self._ctx_bar(ratio)
+        # 进度条自适应宽度，尽量占满第一行
+        try:
+            w = self._status.container_size.width or 80
+        except Exception:
+            w = 80
+        bar_w = max(20, w - 16)
+        bar = self._ctx_bar(ratio, width=bar_w)
         cur = self._fmt_tok(used)
         win = self._fmt_tok(llm.context_window)
         u = llm.usage
@@ -455,20 +479,19 @@ class SparkApp(App):
         cache_seg = (f"  [dim]·[/] [dim]cache[/] [#56D4DD]"
                      f"{self._fmt_tok(cache)}[/]") if cache else ""
         ntools = len(a.tools._tools) if a.tools else 0
-        turn = self._turn
-        # effort 标记
         effort = next((k for k, v in EFFORT_LEVELS.items()
                        if v == llm.thinking_budget), "off")
-        effort_seg = "" if effort == "off" else f"  [dim]·[/] [#FFA657]effort {effort}[/]"
-        return (
-            f"[dim]ctx[/] {bar} [{pct_color}]{pct:>3}%[/]"
-            f"  [dim]{cur}/{win}[/]"
-            f"  [dim]│[/]  [dim]↑[/][#58A6FF]{up}[/]"
-            f" [dim]↓[/][#7EE787]{down}[/]"
+        effort_seg = ("" if effort == "off"
+                      else f"  [dim]·[/] [#FFA657]effort {effort}[/]")
+        line1 = f"[dim]context[/] {bar} [{pct_color}]{pct:>3}%[/]"
+        line2 = (
+            f"[dim]{cur}/{win}[/]"
+            f"  [dim]↑[/][#58A6FF]{up}[/]  [dim]↓[/][#7EE787]{down}[/]"
             f"  [dim]·[/] [dim]{u['calls']} calls[/]{cache_seg}{effort_seg}"
-            f"  [dim]│[/]  [#D2A8FF]{ntools} tools[/]"
-            f"  [dim]│[/]  [dim]turn[/] [#FFA657]{turn}/{a.max_turns}[/]"
+            f"  [dim]·[/] [#D2A8FF]{ntools} tools[/]"
+            f"  [dim]·[/] [dim]turn[/] [#FFA657]{self._turn}/{a.max_turns}[/]"
         )
+        return line1 + "\n" + line2
 
     def _refresh_status(self) -> None:
         """刷新底部状态条（主线程安全调用）。"""
@@ -483,7 +506,7 @@ class SparkApp(App):
         self.call_from_thread(self._refresh_status)
 
     def _write_init_md(self) -> str:
-        """扫描当前仓库，生成 SPARK.md 项目上下文文件。"""
+        """扫描当前仓库，生成 MIRROR.md 项目上下文文件。"""
         import glob
         py_files = sorted(
             os.path.basename(p) for p in glob.glob("*.py")
@@ -495,12 +518,12 @@ class SparkApp(App):
         tool_list = ""
         if self._agent and self._agent.toolforge:
             tool_list = self._agent.toolforge.list_tools()
-        body = f"""# SPARK.md — Project Context
+        body = f"""# MIRROR.md — Project Context
 
-> Auto-generated by `/init`. SPARK loads this to understand the project.
+> Auto-generated by `/init`. MIRROR loads this to understand the project.
 
 ## What this is
-SPARK Agent — a self-evolving terminal agent (Anthropic-protocol LLM +
+MIRROR Agent — a self-evolving terminal agent (Anthropic-protocol LLM +
 tool system + self-evolution via ToolForge). Python + [Textual](https://textual.textualize.io) TUI.
 
 ## Modules
@@ -527,13 +550,13 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
 ## Registered tools
 {tool_list or "(agent not initialized)"}
 """
-        path = "SPARK.md"
+        path = "MIRROR.md"
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(body)
             return f"wrote {path} ({len(body)} bytes)"
         except OSError as e:
-            return f"x failed to write SPARK.md: {e}"
+            return f"x failed to write MIRROR.md: {e}"
 
     # ── input ────────────────────────────────────────────
 
@@ -635,7 +658,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         for i in range(start, end):
             cmd, desc = self._pal_matches[i]
             if i == self._pal_idx:
-                lines.append(f"[bold #FF6B35 on #30363D] ▸ {cmd:<10} {desc} [/]")
+                lines.append(f"[bold #4493F8 on #30363D] ▸ {cmd:<10} {desc} [/]")
             else:
                 lines.append(f"[dim]   {cmd:<10} {desc}[/]")
         if end < n:
@@ -827,7 +850,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
             detail = arg or "all"
             self._sys(self._agent.toolforge.usage_stats(detail=detail))
 
-        # /init — 生成项目上下文文件 SPARK.md
+        # /init — 生成项目上下文文件 MIRROR.md
         elif cmd == "/init":
             self._sys(self._write_init_md())
 
@@ -910,7 +933,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         if self._spin:
             f = SPINNER[self._spin_idx % len(SPINNER)]
             self._spin_idx += 1
-            self._spin.update(f"[#FF6B35]{f} Thinking...[/]")
+            self._spin.update(f"[#4493F8]{f} Thinking...[/]")
         # spinner 周期内同步刷新状态条（用量/进度实时变化）
         self._refresh_status()
 
@@ -996,8 +1019,8 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
     # ── 流式最终回复 ───────────────────────────────────────
 
     def _begin_stream(self) -> None:
-        """第一个 text token 到达：挂载 SPARK 标签 + 流式文本容器。"""
-        self._stream_label = Static("[bold #FF6B35]| SPARK[/]")
+        """第一个 text token 到达：挂载 MIRROR 标签 + 流式文本容器。"""
+        self._stream_label = Static("[bold #4493F8]| MIRROR[/]")
         self._stream_text = Static("", classes="stream-text")
         self._mnt(self._stream_label)
         self._mnt(self._stream_text)
@@ -1012,14 +1035,14 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         """流式结束：移除流式容器，挂载完整 Markdown 渲染。"""
         # 若未启动流式（极端情况，如纯工具无文本），仍挂标签
         if self._stream_label is None:
-            self._stream_label = Static("[bold #FF6B35]| SPARK[/]")
+            self._stream_label = Static("[bold #4493F8]| MIRROR[/]")
             self._mnt(self._stream_label)
         # 移除流式文本容器
         if self._stream_text:
             self._stream_text.remove()
             self._stream_text = None
         # 挂载完整 Markdown
-        self._mnt(Markdown(full_text, classes="SparkMd"))
+        self._mnt(Markdown(full_text, classes="MirrorMd"))
         self._stream_label = None
 
 
@@ -1027,4 +1050,4 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
 
 
 def run_tui(api_key: str, config=None) -> None:
-    SparkApp(api_key=api_key, config=config).run()
+    MirrorApp(api_key=api_key, config=config).run()

@@ -201,7 +201,7 @@ def test_self_evolve_flow():
 
 def main() -> int:
     print("=" * 60)
-    print("SPARK self-evolution test suite")
+    print("MIRROR self-evolution test suite")
     print("=" * 60)
     # 清理任何残留测试工具
     forge_clean, _ = build_forge()

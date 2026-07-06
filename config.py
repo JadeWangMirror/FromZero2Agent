@@ -23,7 +23,7 @@ class Config:
     max_turns: int = 10
     max_history: int = 50
     system_prompt: str = ""          # 空 = 使用内置默认 prompt
-    theme: str = "spark"             # 预留：主题
+    theme: str = "mirror"            # 预留：主题
 
     # 不序列化的运行时字段
     _path: str = field(default="config.json", repr=False)

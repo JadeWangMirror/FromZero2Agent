@@ -26,7 +26,7 @@ def main() -> None:
 
         agent = create_agent(api_key=api_key, config=cfg)
         print("=" * 50)
-        print(f"  SPARK Agent — {cfg.model}")
+        print(f"  MIRROR Agent — {cfg.model}")
         print("  输入 'exit' 或 'quit' 退出")
         print("=" * 50)
 
