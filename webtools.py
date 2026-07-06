@@ -53,7 +53,10 @@ class _HTMLToText(HTMLParser):
 
 
 def _html_to_text(html: str) -> str:
-    return _HTMLToText().feed_html(html) or _HTMLToText().get_text()
+    parser = _HTMLToText()
+    parser.feed(html)
+    parser.close()
+    return parser.get_text()
 
 
 def create_web_tools() -> list[Tool]:

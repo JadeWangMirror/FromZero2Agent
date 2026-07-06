@@ -14,3 +14,4 @@ Thumbs.db
 # runtime artifacts
 *.log
 sessions/
+tools/custom/_usage.json

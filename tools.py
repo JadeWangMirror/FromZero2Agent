@@ -43,8 +43,9 @@ class Tool:
 class ToolRegistry:
     """工具注册中心 — 管理工具集合并分发执行。"""
 
-    def __init__(self) -> None:
+    def __init__(self, stats_sink: Callable[[str, bool], None] | None = None) -> None:
         self._tools: dict[str, Tool] = {}
+        self._stats_sink = stats_sink
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
@@ -59,7 +60,15 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             return f"Unknown tool: {name}"
-        return tool.execute(**input_data)
+        result = tool.execute(**input_data)
+        # 使用统计：成功/失败启发式判定（result 以 Error 开头视为失败）
+        if self._stats_sink is not None:
+            ok = not str(result).lstrip().lower().startswith(("error", "tool execution error"))
+            try:
+                self._stats_sink(name, ok)
+            except Exception:
+                pass
+        return result
 
 
 # ── 内置示例工具 ──────────────────────────────────────────────

@@ -100,6 +100,8 @@ class Agent:
         # 上下文压缩
         self._compress_threshold = 20_000   # 字符数阈值
         self._keep_recent = 6               # 压缩时保留最近消息数
+        # 单个工具结果回传给 LLM 的字符上限（超出截断，保护上下文）
+        self._max_tool_result_chars = 30_000
 
     def _build_system_prompt(self) -> str:
         """构建 system prompt：基础指导（或用户自定义）+ 动态工具清单。"""
@@ -262,7 +264,7 @@ class Agent:
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tu["id"],
-                    "content": result,
+                    "content": self._truncate_result(result),
                 })
 
             messages.append({"role": "user", "content": tool_results})
@@ -298,6 +300,15 @@ class Agent:
             "content": f"[Earlier conversation summary]\n{summary}",
         }
         self._history = [summary_msg] + list(recent)
+
+    def _truncate_result(self, result: str) -> str:
+        """工具结果过长则截断，避免单条结果撑爆上下文。"""
+        if not isinstance(result, str):
+            result = str(result)
+        cap = self._max_tool_result_chars
+        if len(result) <= cap:
+            return result
+        return result[:cap] + f"\n\n... (truncated, {len(result) - cap} more chars omitted)"
 
     @staticmethod
     def _msg_size(m) -> int:
@@ -375,6 +386,8 @@ def create_agent(api_key: str | None = None, config=None, **kwargs) -> Agent:
     # 自我完善系统:加载已有自造工具 + 注册元工具
     forge = ToolForge(registry)
     forge.load_existing()
+    # 接通使用统计：每次工具调用都记一笔
+    registry._stats_sink = forge.record_usage
     for tool in forge.get_meta_tools():
         registry.register(tool)
 

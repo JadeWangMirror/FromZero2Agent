@@ -72,19 +72,38 @@ class LLMClient:
         tools: list[ToolParam] | None = None,
         system: str | None = None,
     ) -> Message:
-        """非流式发送。"""
+        """非流式发送（带重试，供摘要等内部调用）。"""
         import anthropic
         client = anthropic.Anthropic(api_key=self.api_key, base_url=self.base_url)
         kwargs: dict = {
             "model": self.model,
             "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
             "messages": messages,
         }
         if tools:
             kwargs["tools"] = tools
         if system:
             kwargs["system"] = system
-        return client.messages.create(**kwargs)
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries):
+            try:
+                return client.messages.create(**kwargs)
+            except anthropic.APIStatusError as e:
+                code = getattr(e, "status_code", 0)
+                if code == 429 or code >= 500 and attempt < self.max_retries - 1:
+                    last_exc = e
+                    time.sleep(self.retry_backoff * (2 ** attempt))
+                    continue
+                raise
+            except (anthropic.APIConnectionError, anthropic.APITimeoutError) as e:
+                last_exc = e
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_backoff * (2 ** attempt))
+                    continue
+                raise
+        assert last_exc is not None
+        raise last_exc
 
     def send_stream(
         self,
