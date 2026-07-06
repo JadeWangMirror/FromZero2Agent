@@ -54,6 +54,9 @@ COMMANDS = [
     ("/quit",    "exit SPARK"),
 ]
 
+# 无参命令:Enter 直接执行而非补全
+_NO_ARG_COMMANDS = {"/help", "/clear", "/quit", "/tools", "/config"}
+
 
 # ── App ─────────────────────────────────────────────────────
 
@@ -233,15 +236,22 @@ class SparkApp(App):
     # ── input ────────────────────────────────────────────
 
     def action_submit(self) -> None:
-        """Enter:命令名补全阶段→补全;否则提交。"""
+        """Enter:命令名补全阶段→补全或直接执行;否则提交。"""
         if not self._inp.has_focus:
             return
         if self._busy:
             return
         val = self._inp.text
         stripped = val.strip()
-        # 命令名补全:palette 可见且正在输入 /命令(无空格) → 补全
+        # 命令阶段:palette 可见且正在输入 /命令(无空格)
         if self._pal_visible and stripped.startswith("/") and " " not in stripped:
+            # 无参命令 → 直接执行,免去补全后再 Enter
+            if stripped in _NO_ARG_COMMANDS:
+                self._inp.clear()
+                self._hide_palette()
+                self._go(stripped)
+                return
+            # 需要参数的命令 → 补全到输入框等用户填参数
             if self._pal_matches:
                 self._accept_palette()
             return
@@ -498,6 +508,24 @@ class SparkApp(App):
                 if len(d) > 500:
                     d = d[:500] + "..."
                 self._mnt_t(Static(f"[#3FB950]  <- {d}[/]"))
+
+            elif ev == "sub:tool_call":
+                role = data.get("role", "?")
+                a = ", ".join(f"{k}={v}" for k, v in data["args"].items())
+                self._mnt_t(Static(
+                    f"[#D2A8FF]    [{role}] {data['name']}[/] [dim]({a})[/]"
+                ))
+
+            elif ev == "sub:tool_result":
+                role = data.get("role", "?")
+                d = str(data["result"])
+                if len(d) > 200:
+                    d = d[:200] + "..."
+                self._mnt_t(Static(f"[#3FB950]    [{role}] <- {d}[/]"))
+
+            elif ev.startswith("sub:"):
+                # 子 agent 的 thinking/text 不显示,避免刷屏
+                pass
 
         try:
             ans = self._agent.run(task, callback=cb)

@@ -10,3 +10,7 @@ venv/
 *.egg
 .DS_Store
 Thumbs.db
+
+# runtime artifacts
+*.log
+sessions/

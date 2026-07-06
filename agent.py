@@ -97,6 +97,9 @@ class Agent:
         self._depth = 0
         self._max_depth = 3
         self._current_callback: StepCallback | None = None
+        # 上下文压缩
+        self._compress_threshold = 20_000   # 字符数阈值
+        self._keep_recent = 6               # 压缩时保留最近消息数
 
     def _build_system_prompt(self) -> str:
         """构建 system prompt：基础指导（或用户自定义）+ 动态工具清单。"""
@@ -179,6 +182,8 @@ class Agent:
           "sub:*"        → 子 agent 事件,{"role":..., ...}
         """
         self._current_callback = callback
+        # 上下文过大则先压缩历史
+        self._maybe_compress()
         # 从历史 + 当前用户消息开始
         messages: list[MessageParam] = list(self._history)
         messages.append({"role": "user", "content": task})
@@ -272,6 +277,81 @@ class Agent:
         # 裁剪：保留最近 N 条
         if len(self._history) > self._max_history:
             self._history = self._history[-self._max_history:]
+
+    # ── 上下文自动压缩 ─────────────────────────────────────
+
+    def _maybe_compress(self) -> None:
+        """历史过大时，把旧消息摘要化，保留最近几轮原文。"""
+        if len(self._history) <= self._keep_recent + 2:
+            return
+        total = sum(self._msg_size(m) for m in self._history)
+        if total < self._compress_threshold:
+            return
+        old = self._history[:-self._keep_recent]
+        recent = self._history[-self._keep_recent:]
+        try:
+            summary = self._summarize(old)
+        except Exception:
+            return  # 压缩失败不影响主流程
+        summary_msg: MessageParam = {
+            "role": "user",
+            "content": f"[Earlier conversation summary]\n{summary}",
+        }
+        self._history = [summary_msg] + list(recent)
+
+    @staticmethod
+    def _msg_size(m) -> int:
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, str):
+            return len(c)
+        if isinstance(c, list):
+            return sum(len(str(b)) for b in c)
+        return 0
+
+    def _messages_to_text(self, messages) -> str:
+        out = []
+        for m in messages:
+            role = m.get("role", "?") if isinstance(m, dict) else "?"
+            c = m.get("content") if isinstance(m, dict) else ""
+            if isinstance(c, str):
+                out.append(f"[{role}] {c}")
+            elif isinstance(c, list):
+                parts = []
+                for b in c:
+                    if not isinstance(b, dict):
+                        parts.append(str(b))
+                        continue
+                    t = b.get("type", "")
+                    if t == "text":
+                        parts.append(b.get("text", ""))
+                    elif t == "tool_use":
+                        parts.append(f"(tool_use {b.get('name')} {b.get('input')})")
+                    elif t == "tool_result":
+                        parts.append(f"(tool_result {b.get('content', '')})")
+                out.append(f"[{role}] " + " ".join(parts))
+        return "\n".join(out)
+
+    def _summarize(self, old_messages) -> str:
+        text = self._messages_to_text(old_messages)
+        if len(text) > 12000:
+            text = text[:12000] + "\n... (truncated for summarization)"
+        prompt = [{
+            "role": "user",
+            "content": (
+                "Summarize the conversation below. Preserve: key facts, user "
+                "preferences, decisions made, code/files touched, important tool "
+                "results, and any reusable context. Be concise but lossless on "
+                "technical details.\n\n" + text
+            ),
+        }]
+        resp = self.llm.send(
+            prompt,
+            system="You compress conversation history. Concise, no preamble.",
+        )
+        return "".join(
+            getattr(b, "text", "") for b in resp.content
+            if getattr(b, "type", "") == "text"
+        )
 
 
 # ── 便捷函数 ───────────────────────────────────────────────

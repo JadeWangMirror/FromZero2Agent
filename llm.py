@@ -6,6 +6,7 @@ LLM 客户端 — 封装 Anthropic 协议调用（DeepSeek 兼容端点）。
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -62,6 +63,8 @@ class LLMClient:
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.max_retries = 3
+        self.retry_backoff = 1.0
 
     def send(
         self,
@@ -90,7 +93,7 @@ class LLMClient:
         system: str | None = None,
         on_event: StreamCallback | None = None,
     ) -> _SimpleMsg:
-        """流式发送，httpx 直连 SSE，实时回调 on_event。"""
+        """流式发送，httpx 直连 SSE，实时回调 on_event。带重试。"""
         body: dict = {
             "model": self.model,
             "max_tokens": self.max_tokens,
@@ -109,10 +112,33 @@ class LLMClient:
             "content-type": "application/json",
         }
 
-        # 累积最终 content blocks
-        blocks: list[dict] = []      # 最终 blocks 列表
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries):
+            try:
+                return self._stream_once(body, headers, on_event)
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                # 429 / 5xx 可重试；其余 4xx 直接抛
+                if code == 429 or code >= 500:
+                    last_exc = e
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.retry_backoff * (2 ** attempt))
+                        continue
+                raise
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last_exc = e
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_backoff * (2 ** attempt))
+                    continue
+                raise
+        assert last_exc is not None
+        raise last_exc
+
+    def _stream_once(self, body, headers, on_event) -> _SimpleMsg:
+        """单次流式请求 + SSE 解析。"""
+        blocks: list[dict] = []
         cur_block: dict | None = None
-        cur_index: int = -1          # 当前 block 在 blocks 中的索引
+        cur_index: int = -1
         tool_input_buf: str = ""
 
         with httpx.stream(
