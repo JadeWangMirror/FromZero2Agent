@@ -53,8 +53,6 @@ def _welcome(model: str) -> str:
     return f"""\
 [{ACCENT}]  MIRROR Agent[/]      [dim]v2.0.0  self-evolving[/]
 [dim]  model:[/] [bold]{model}[/]
-[dim]  self-evolution:[/] [cyan]propose_tool[/][dim] → [/][cyan]create_tool[/][dim] → [/][cyan]review_tool[/]
-[dim]  new:[/] [bold]/effort · /context · /compact · /cost · /init · /models[/]
 [dim]  live context bar below the input  ·  [/][bold]/help[/][dim] for all commands[/]"""
 
 # ── 斜杠命令清单（用于补全栏）──────────────────────────────
