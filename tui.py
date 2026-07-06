@@ -76,6 +76,9 @@ EFFORT_LEVELS: dict[str, int | None] = {
     "high": 12000,
 }
 
+# 命令补全面板最多同时可见的行数；超出靠窗口滚动（▲/▼ 提示）
+PALETTE_MAX_VISIBLE = 6
+
 
 # ── App ─────────────────────────────────────────────────────
 
@@ -155,12 +158,12 @@ class SparkApp(App):
     #command-palette {
         display: none;
         height: auto;
-        max-height: 12;
+        max-height: 9;                   /* 6 可见 + ▲/▼ + 边框，绝不遮输入框 */
         background: #161B22;
         border: solid #30363D;
         border-bottom: none;
         padding: 0 1;
-        overflow: hidden auto;
+        overflow: hidden;                /* 内容由 _render_palette 窗口化裁切 */
     }
     #command-palette.visible { display: block; }
 
@@ -472,12 +475,27 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
             pass
 
     def _render_palette(self) -> None:
-        lines = []
-        for i, (cmd, desc) in enumerate(self._pal_matches):
+        """渲染补全面板：只显示选中项附近的一个窗口，超出用 ▲/▼ 滚动提示。"""
+        n = len(self._pal_matches)
+        if n == 0:
+            self._palette.update("")
+            return
+        maxv = PALETTE_MAX_VISIBLE
+        half = maxv // 2
+        start = max(0, self._pal_idx - half)
+        end = min(n, start + maxv)
+        start = max(0, end - maxv)          # 末尾凑不齐则前移，保证窗口尽量满
+        lines: list[str] = []
+        if start > 0:
+            lines.append("[dim]    ▲  more ↑[/]")
+        for i in range(start, end):
+            cmd, desc = self._pal_matches[i]
             if i == self._pal_idx:
                 lines.append(f"[bold #FF6B35 on #30363D] ▸ {cmd:<10} {desc} [/]")
             else:
                 lines.append(f"[dim]   {cmd:<10} {desc}[/]")
+        if end < n:
+            lines.append(f"[dim]    ▼  {n - end} more ↓[/]")
         self._palette.update("\n".join(lines))
 
     def _accept_palette(self) -> None:
