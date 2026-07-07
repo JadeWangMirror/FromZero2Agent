@@ -261,6 +261,15 @@ def record_signal(kind: str, content: str, tags: str = "") -> str:
     return f"[✓] signal {eid} ({kind}) recorded for reflection."
 
 
+def pending_signals() -> int:
+    """尚未反思的挣扎信号数(驱动 agent 主动 consolidate_memory 去识别边界)。"""
+    g = _graph()
+    return sum(1 for _, d in g.nodes(data=True)
+               if d.get("type") == "event"
+               and d.get("data", {}).get("signal")
+               and not d.get("reflected"))
+
+
 def forget(node_id: str) -> str:
     """按 id 删除任意层节点(event/concept/intent)。"""
     g = _graph()
@@ -331,6 +340,21 @@ def _concept_strength(g: nx.DiGraph, concept: str) -> int:
         return d["strength"]
     return sum(1 for _, _, e in g.in_edges(concept, data=True)
                if e.get("type") == DERIVED_FROM)
+
+
+def _best_concept_match(g: nx.DiGraph, statement: str, floor: float = 0.25) -> str | None:
+    """返回与 statement 最相似的【活跃】concept 节点 id;无则 None。"""
+    st = _tokens(statement)
+    if not st:
+        return None
+    best, best_j = None, 0.0
+    for n, d in g.nodes(data=True):
+        if d.get("type") != "concept" or d["data"].get("status") == "superseded":
+            continue
+        j = _jaccard(st, _tokens(d["data"].get("statement", "")))
+        if j > best_j:
+            best, best_j = n, j
+    return best if best_j >= floor else None
 
 
 def _has_intent_for(g: nx.DiGraph, concept: str) -> bool:
@@ -491,6 +515,8 @@ def consolidate(summarize_fn, tools=None) -> str:
     for n, d in list(g.nodes(data=True)):
         if d.get("type") != "concept":
             continue
+        if d["data"].get("status") == "superseded":
+            continue
         strength = _concept_strength(g, n)
         if strength >= INTENT_THRESHOLD and not _has_intent_for(g, n):
             stmt = d["data"]["statement"]
@@ -539,7 +565,7 @@ def capability_gaps() -> list[tuple[str, str]]:
             for n, d in g.nodes(data=True)
             if d.get("type") == "intent"
             and d["data"].get("kind") == "capability_gap"
-            and d["data"].get("status") != "done"]
+            and d["data"].get("status") not in ("done", "superseded")]
 
 
 def satisfy_gap(tool_name: str, desc: str = "") -> int:
@@ -633,6 +659,62 @@ def reflect(summarize_fn) -> str:
             f"{new_b} capability boundary/boundaries surfaced.")
 
 
+def resolve_supersede(summarize_fn) -> str:
+    """矛盾/取代处理: 识别"新概念取代旧概念"(如 switched to uv 取代 uses poetry)。
+
+    扁平记忆做不到 —— 它只会把两条都留下,产生自相矛盾。图在这里挣钱:
+    把被取代的旧 concept 标 status=superseded(不再浮现),连带关闭其 intent。
+    LLM 一次批处理判定 genuineness。
+    """
+    g = _graph()
+    concepts = [(n, d["data"].get("statement", ""))
+                for n, d in g.nodes(data=True)
+                if d.get("type") == "concept"
+                and d["data"].get("status") != "superseded"]
+    if len(concepts) < 2:
+        return "Supersede: fewer than 2 active concepts — nothing to resolve."
+
+    listing = "\n".join(f"{i}. {s}" for i, (_, s) in enumerate(concepts, 1))
+    prompt = (
+        "Below are concepts in an AI agent's memory graph. Identify any SUPERSEDE "
+        "relationship — where one concept makes another OUTDATED or CONTRADICTED "
+        "(e.g. 'user switched to uv for packages' supersedes 'user uses poetry'). "
+        "For each, output exactly one line:\n"
+        "  SUPERSEDE: <the newer/replacing concept statement> replaces <the outdated one>\n"
+        "Copy both statements closely from the list. Output nothing if none.\n\n" + listing
+    )
+    try:
+        raw = summarize_fn(prompt) or ""
+    except Exception:
+        raw = ""
+
+    superseded = 0
+    for line in raw.splitlines():
+        m = re.match(r"\s*SUPERSEDE:\s*(.+?)\s+replaces\s+(.+)", line, re.I)
+        if not m:
+            continue
+        new_node = _best_concept_match(g, m.group(1).strip())
+        old_node = _best_concept_match(g, m.group(2).strip())
+        if not (new_node and old_node) or new_node == old_node:
+            continue
+        g.nodes[old_node]["data"]["status"] = "superseded"
+        g.nodes[old_node]["data"]["replaced_by"] = new_node
+        g.nodes[old_node]["last_touched"] = _now()
+        if not g.has_edge(new_node, old_node):
+            g.add_edge(new_node, old_node, type=RELATED_TO, weight=1.0)
+        # 连带: 旧 concept 结晶出的 intent 一并失效
+        for n2, d2 in g.nodes(data=True):
+            if (d2.get("type") == "intent"
+                    and d2["data"].get("status") not in ("done", "superseded")
+                    and g.has_edge(n2, old_node)):
+                d2["data"]["status"] = "superseded"
+        superseded += 1
+
+    if superseded:
+        _save_graph(g)
+    return f"Supersede: assessed {len(concepts)} concept(s) → {superseded} superseded."
+
+
 # ── 涌现式读取(无 query,读图当前状态) ─────────────────
 
 def _pagerank(g: nx.DiGraph) -> dict:
@@ -657,14 +739,31 @@ def select_context(g: nx.DiGraph) -> str:
     # immediate: 活跃 intent(紧急度 × 拓扑 × 近因)
     intents = sorted(
         ((n, d) for n, d in g.nodes(data=True)
-         if d.get("type") == "intent" and d["data"].get("status") != "done"),
+         if d.get("type") == "intent"
+         and d["data"].get("status") not in ("done", "superseded")),
         key=lambda nd: nd[1]["data"].get("urgency", 1) * (0.4 + pr.get(nd[0], 0)) * rec(nd[1]),
         reverse=True,
     )[:IMM_INTENTS]
 
+    # 被取代信念的支撑事件一并隐去(只撑起 superseded concept 的 event 不再浮现)
+    superseded_concepts = {
+        n for n, d in g.nodes(data=True)
+        if d.get("type") == "concept" and d["data"].get("status") == "superseded"
+    }
+
+    def _event_superseded(e) -> bool:
+        """事件的所有 concept 目标都已 superseded → 该事件过时,不再浮现。
+        未折叠的事件(无目标)保留(fresh 观察)。"""
+        targets = [c for _, c, ed in g.out_edges(e, data=True)
+                   if ed.get("type") == DERIVED_FROM]
+        if not targets:
+            return False
+        return all(c in superseded_concepts for c in targets)
+
     # immediate: 最近 event(海马近因主导)
     events = sorted(
-        ((n, d) for n, d in g.nodes(data=True) if d.get("type") == "event"),
+        ((n, d) for n, d in g.nodes(data=True)
+         if d.get("type") == "event" and not _event_superseded(n)),
         key=lambda nd: nd[1].get("created", ""),
         reverse=True,
     )[:IMM_EVENTS]
@@ -677,7 +776,9 @@ def select_context(g: nx.DiGraph) -> str:
 
     # working: 强 concept(PageRank × 近因 × log strength)
     concepts = sorted(
-        ((n, d) for n, d in g.nodes(data=True) if d.get("type") == "concept"),
+        ((n, d) for n, d in g.nodes(data=True)
+         if d.get("type") == "concept"
+         and d["data"].get("status") != "superseded"),
         key=lambda nd: (0.4 + pr.get(nd[0], 0)) * rec(nd[1])
                        * math.log(1 + nd[1]["data"].get("strength", 1)),
         reverse=True,
