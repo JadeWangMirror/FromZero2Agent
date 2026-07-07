@@ -162,7 +162,7 @@ class Agent:
         max_tokens: int = 4096,
         max_turns: int = 10,
         tools: ToolRegistry | None = None,
-        max_history: int = 50,
+        max_history: int = 500,
         temperature: float = 1.0,
         system_prompt: str | None = None,
         toolforge=None,
@@ -185,9 +185,14 @@ class Agent:
         self._depth = 0
         self._max_depth = 3
         self._current_callback: StepCallback | None = None
-        # 上下文压缩
-        self._compress_threshold = 20_000   # 字符数阈值
-        self._keep_recent = 6               # 压缩时保留最近消息数
+        # 上下文容量按模型窗口动态拉满(之前写死 20k 字符≈5k token,只用了 128k
+        # 窗口的 ~4%,频繁压缩/裁剪就是"提笔忘字"的根因)。
+        # 历史可用 ≈ 窗口 − 预留(输出 max_tokens + system/tools/余量 8k);
+        # 压缩阈值取可用量的 80%(留 20% 给本轮增长),char ≈ token×4。
+        _win = self.llm.context_window or 128_000
+        _usable = max(8_000, _win - (self.llm.max_tokens + 8_000))
+        self._compress_threshold = int(_usable * 0.80 * 4)
+        self._keep_recent = 10              # 压缩时多留几轮原文(窗口够大)
         # 单个工具结果回传给 LLM 的字符上限（超出截断，保护上下文）
         self._max_tool_result_chars = 30_000
 
