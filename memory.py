@@ -61,6 +61,14 @@ DERIVED_FROM = "DERIVED_FROM"
 DEADLINE_FOR = "DEADLINE_FOR"
 RELATED_TO = "RELATED_TO"
 
+# ── 时序抽取(前瞻记忆: 截止/计划时间) ──
+_DEADLINE_RE = re.compile(
+    r"\b(by|before|due|deadline|ship|release|launch|schedule|plan)\b"
+    r"|\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"|\b(tomorrow|tonight|eod|eow|weekend)\b",
+    re.IGNORECASE,
+)
+
 _STOP = {
     "a", "an", "the", "of", "to", "in", "on", "for", "and", "or", "with",
     "that", "this", "it", "is", "are", "be", "by", "from", "as", "at",
@@ -303,6 +311,37 @@ def _has_intent_for(g: nx.DiGraph, concept: str) -> bool:
     return False
 
 
+def _extract_temporal(g: nx.DiGraph, events: list[tuple]) -> int:
+    """前瞻记忆: 给截止/计划事件挂 time 节点 + DEADLINE_FOR 边。
+
+    这是图挣钱的差异点之一 —— 扁平表表达不了"这件事有截止时间"。
+    让时序事实在读取时不被 recency 淹没,并填充非 DERIVED_FROM 的真实结构。
+    返回新建 time 节点数。
+    """
+    new_t = 0
+    due_nodes: dict[str, str] = {
+        d["data"].get("label"): n for n, d in g.nodes(data=True)
+        if d.get("type") == "time"
+    }
+    for n, d in events:
+        content = d.get("data", {}).get("content", "")
+        m = _DEADLINE_RE.search(content)
+        if not m:
+            continue
+        label = m.group(0).lower().strip()
+        d["data"]["due"] = label
+        if label not in due_nodes:
+            tid = _next_id(g, "t-")
+            g.add_node(tid, type="time", data={"label": label},
+                       created=_now(), last_touched=_now())
+            due_nodes[label] = tid
+            new_t += 1
+        # event → time (该事件 deadline_for 此时序锚点)
+        if not g.has_edge(n, due_nodes[label]):
+            g.add_edge(n, due_nodes[label], type=DEADLINE_FOR, weight=2.0)
+    return new_t
+
+
 def _decay_and_prune(g: nx.DiGraph) -> int:
     """边权按龄衰减;极低权边剪掉;孤立且老的已折叠 event 剪掉(皮层知识保留)。"""
     pruned = 0
@@ -441,6 +480,9 @@ def consolidate(summarize_fn, tools=None) -> str:
             if kind == "capability_gap":
                 gaps += 1
 
+    # ── 时序抽取(前瞻记忆: 截止/计划) ──
+    new_t = _extract_temporal(g, events)
+
     pruned = _decay_and_prune(g)
     _save_graph(g)
 
@@ -451,6 +493,8 @@ def consolidate(summarize_fn, tools=None) -> str:
         parts.append(f"{new_i} intent(s) crystallized")
     if gaps:
         parts.append(f"{gaps} capability gap(s)")
+    if new_t:
+        parts.append(f"{new_t} time anchor(s)")
     if pruned:
         parts.append(f"{pruned} decayed node(s) pruned")
     return ", ".join(parts) + "."
@@ -529,6 +573,12 @@ def select_context(g: nx.DiGraph) -> str:
         key=lambda nd: nd[1].get("created", ""),
         reverse=True,
     )[:IMM_EVENTS]
+    # 前瞻: 截止/计划事件,不论新旧都浮上来(前瞻记忆,不被 recency 淹没)
+    recent_ids = {n for n, _ in events}
+    due = [(n, d) for n, d in g.nodes(data=True)
+           if d.get("type") == "event"
+           and d["data"].get("due")
+           and n not in recent_ids][:4]
 
     # working: 强 concept(PageRank × 近因 × log strength)
     concepts = sorted(
@@ -566,6 +616,10 @@ def select_context(g: nx.DiGraph) -> str:
         lines.append("▸ IMMEDIATE (recent events):")
         for _, d in events:
             lines.append(f"   - {d['data'].get('content', '')[:160]}")
+    if due:
+        lines.append("▸ DUE / PENDING (prospective — deadlines, recency-proof):")
+        for _, d in due:
+            lines.append(f"   ⏰ {d['data'].get('content', '')[:160]}")
     if concepts:
         lines.append("▸ WORKING (reinforced concepts, PageRank-ranked):")
         for _, d in concepts:
