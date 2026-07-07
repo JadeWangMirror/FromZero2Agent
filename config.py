@@ -20,7 +20,7 @@ class Config:
     base_url: str = "https://api.deepseek.com/anthropic"
     max_tokens: int = 4096
     temperature: float = 1.0
-    max_turns: int = 10
+    max_turns: int = 30            # 长任务(建多文件/调试)需要更多轮;10 太容易截断
     max_history: int = 50
     system_prompt: str = ""          # 空 = 使用内置默认 prompt
     theme: str = "mirror"            # 预留：主题

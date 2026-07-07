@@ -160,7 +160,7 @@ class Agent:
         base_url: str = "https://api.deepseek.com/anthropic",
         model: str = "deepseek-v4-pro",
         max_tokens: int = 4096,
-        max_turns: int = 10,
+        max_turns: int = 30,
         tools: ToolRegistry | None = None,
         max_history: int = 500,
         temperature: float = 1.0,
