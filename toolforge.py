@@ -90,7 +90,7 @@ class ToolForge:
         self.registry.register(Tool(
             name=meta["name"],
             description=meta["description"],
-            parameters=meta["parameters"],
+            parameters=self._normalize_parameters(meta["parameters"]),
             fn=fn,
             required=meta.get("required"),
         ))
@@ -620,6 +620,7 @@ class ToolForge:
     # ── 内部:写盘 / 测试 / 校验 ───────────────────────────
 
     def _write_tool(self, name, code, description, parameters, test_code) -> None:
+        parameters = self._normalize_parameters(parameters)
         d = self._tool_dir(name)
         os.makedirs(d, exist_ok=True)
         with open(self._tool_path(name), "w", encoding="utf-8") as f:
@@ -672,6 +673,21 @@ class ToolForge:
                 continue
             req.append(k)
         return req
+
+    @staticmethod
+    def _normalize_parameters(parameters) -> dict:
+        """归一化为 {属性名: 属性schema} 形式。
+
+        兼容 LLM 误传的完整 schema（含 type=object + properties）——
+        否则 Tool.to_param 会把整个 schema 当成一个名为 "type" 的属性，
+        触发 DeepSeek 校验报错："object" is not of types "boolean","object"。
+        """
+        if not isinstance(parameters, dict):
+            return {}
+        if (parameters.get("type") == "object"
+                and isinstance(parameters.get("properties"), dict)):
+            return parameters["properties"]
+        return parameters
 
     def _log(self, msg: str) -> None:
         log_path = os.path.join(self.custom_dir, "toolforge.log")

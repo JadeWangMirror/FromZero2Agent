@@ -132,8 +132,16 @@ class Agent:
         self._max_tool_result_chars = 30_000
 
     def _build_system_prompt(self) -> str:
-        """构建 system prompt：基础指导（或用户自定义）+ 动态工具清单。"""
+        """构建 system prompt：基础指导（或用户自定义）+ 持久记忆 + 动态工具清单。"""
         base = self.system_prompt if self.system_prompt else SYSTEM_PROMPT
+        # 自动注入持久化记忆（读取即进入上下文，无需工具调用）
+        try:
+            from memory import format_for_prompt
+            mem = format_for_prompt()
+            if mem:
+                base = base + "\n" + mem
+        except Exception:
+            pass
         if not self.tools:
             return base
         lines = ["", "AVAILABLE TOOLS:"]
@@ -462,6 +470,28 @@ def create_agent(api_key: str | None = None, config=None, **kwargs) -> Agent:
         registry.register(tool)
     for tool in create_web_tools():
         registry.register(tool)
+
+    # 内置持久记忆：写入用工具，读取自动注入 system prompt（见 _build_system_prompt）
+    from memory import remember as mem_remember, forget as mem_forget
+    from tools import Tool as _Tool
+    registry.register(_Tool(
+        "remember",
+        "Persist a durable memory — a user preference, standing rule, or important "
+        "context that should outlive this session. Call when the user asks to "
+        "remember something, or when you discover a rule worth keeping. Saved memories "
+        "are auto-loaded into context on future turns; there is no read tool.",
+        {"content": {"type": "string", "description": "the fact / rule / preference to remember"},
+         "tags": {"type": "string", "description": "comma-separated tags (optional)", "default": ""}},
+        mem_remember,
+        required=["content"],
+    ))
+    registry.register(_Tool(
+        "forget",
+        "Delete a persisted memory by its id (shown in the PERSISTENT MEMORY block).",
+        {"memory_id": {"type": "string", "description": "the id of the memory to remove"}},
+        mem_forget,
+        required=["memory_id"],
+    ))
 
     # 自我完善系统:加载已有自造工具 + 注册元工具
     forge = ToolForge(registry)
