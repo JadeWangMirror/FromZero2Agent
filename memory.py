@@ -261,6 +261,15 @@ def record_signal(kind: str, content: str, tags: str = "") -> str:
     return f"[✓] signal {eid} ({kind}) recorded for reflection."
 
 
+def pending_signals() -> int:
+    """尚未反思的挣扎信号数(驱动 agent 主动 consolidate_memory 去识别边界)。"""
+    g = _graph()
+    return sum(1 for _, d in g.nodes(data=True)
+               if d.get("type") == "event"
+               and d.get("data", {}).get("signal")
+               and not d.get("reflected"))
+
+
 def forget(node_id: str) -> str:
     """按 id 删除任意层节点(event/concept/intent)。"""
     g = _graph()

@@ -196,6 +196,16 @@ class Agent:
                 base = base + "\n\n⚠ SELF-EVOLUTION SIGNAL (self-detected): " + sig
         except Exception:
             pass
+        # 待反思信号攒够 → 提醒 consolidate_memory(否则边界永远不浮现)
+        try:
+            from memory import pending_signals
+            n = pending_signals()
+            if n >= 3:
+                base += (f"\n\n⚠ {n} unreflected struggle signals (failures/workarounds) "
+                         f"are queued in memory. Run consolidate_memory to reflect on them "
+                         f"and surface the capability boundaries they imply.")
+        except Exception:
+            pass
         if not self.tools:
             return base
         lines = ["", "AVAILABLE TOOLS:"]
