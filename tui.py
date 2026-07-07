@@ -83,9 +83,21 @@ _LOGO_GRADIENT = ['#1F6FEB', '#2D7BF0', '#3B82F6', '#4493F8', '#5AA9F6', '#79C0F
 
 MIRROR = "\n".join(f"  [bold {c}]{ln}[/]" for c, ln in zip(_LOGO_GRADIENT, _MIRROR_RAW.strip().splitlines()))
 
+def _version() -> str:
+    """git 短哈希,启动时显示,方便确认跑的是不是最新代码。"""
+    try:
+        import subprocess
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=2,
+        ).decode().strip()
+    except Exception:
+        return "?"
+
+
 def _welcome(model: str) -> str:
     return f"""\
-[{ACCENT}]  MIRROR Agent[/]      [dim]v2.0.0  self-evolving[/]
+[{ACCENT}]  MIRROR Agent[/]      [dim]v2.0.0 ({_version()})  self-evolving[/]
 [dim]  model:[/] [bold]{model}[/]
 [dim]  live context bar below the input  ·  [/][bold]/help[/][dim] for all commands[/]"""
 
@@ -211,13 +223,13 @@ class ToolCallBlock(Widget):
         marker = "▸" if self.collapsed else "▾"
         prefix = f"[{self.role}] " if self.role else ""
         return (f"[#6E7681]{marker}[/] [bold #D2A8FF]{prefix}{self.tool_name}[/]"
-                f"  [dim]{_esc(self._args_str())}[/]{self._status()}")
+                f"  [dim]{_esc(_clean(self._args_str()))}[/]{self._status()}")
 
     def _body_markup(self) -> str:
         lines = ["[bold #C9D1D9]arguments[/]"]
         if self.tool_args:
             for k, v in self.tool_args.items():
-                lines.append(f"  [dim]{k}:[/] {_esc(self._trunc(repr(v), 500))}")
+                lines.append(f"  [dim]{k}:[/] {_esc(_clean(self._trunc(repr(v), 500)))}")
         else:
             lines.append("  [dim](none)[/]")
         if self.done:
@@ -225,7 +237,7 @@ class ToolCallBlock(Widget):
             res = self.result or "(no output)"
             lines.append(f"[bold #C9D1D9]result[/]  "
                          f"[dim]({self._fmt_chars(len(res))})[/]")
-            lines.append(_esc(self._trunc(res, 4000)))
+            lines.append(_esc(_clean(self._trunc(res, 4000))))
         else:
             lines += ["", "[dim]… running[/]"]
         return "\n".join(lines)
