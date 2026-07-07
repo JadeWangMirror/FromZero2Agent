@@ -662,11 +662,12 @@ class Agent:
         reflect: 从失败/绕路信号识别真正的能力边界(挣扎指纹,非词面重复)。
         两者都一次 LLM 批处理,成本可控。返回报告 + 涌现快照。
         """
-        from memory import consolidate, reflect, context_block
+        from memory import consolidate, reflect, resolve_supersede, context_block
         tools = ([(name, t.description) for name, t in self.tools._tools.items()]
                  if self.tools else [])
         report = consolidate(self._llm_summarize, tools=tools)
         report += "\n" + reflect(self._llm_summarize)
+        report += "\n" + resolve_supersede(self._llm_summarize)
         return report + "\n" + context_block()
 
 
