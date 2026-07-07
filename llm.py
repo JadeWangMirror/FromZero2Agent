@@ -305,11 +305,13 @@ class LLMClient:
                     elif ctype == "thinking":
                         cur_block = {"type": "thinking", "thinking": ""}
                     elif ctype == "tool_use":
+                        # 部分端点（如 DeepSeek 兼容层）直接在 start 里给出完整 input
+                        inline = cb.get("input")
                         cur_block = {
                             "type": "tool_use",
                             "id": cb.get("id", ""),
                             "name": cb.get("name", ""),
-                            "input": {},
+                            "input": inline if isinstance(inline, dict) and inline else {},
                         }
                         tool_input_buf = ""
                         if on_event:
@@ -356,7 +358,15 @@ class LLMClient:
 
                 # ── content_block_stop ──
                 elif etype == "content_block_stop":
-                    pass
+                    # 兜底：最后一段 delta 可能未触发完整 json.loads，stop 时再解析一次
+                    idx = event.get("index", cur_index)
+                    if (idx < len(blocks)
+                            and blocks[idx].get("type") == "tool_use"
+                            and tool_input_buf):
+                        try:
+                            blocks[idx]["input"] = json.loads(tool_input_buf)
+                        except json.JSONDecodeError:
+                            pass
 
                 # ── message_delta / message_stop ──
                 elif etype == "message_delta":

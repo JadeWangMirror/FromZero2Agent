@@ -53,6 +53,8 @@ def create_file_tools(base_dir: str | None = None) -> list[Tool]:
     # ── write_file ─────────────────────────────────────────
     def _write_file(path: str, content: str) -> str:
         full = _resolve(base, path)
+        if not isinstance(content, str):    # 容错：个别模型把 content 传成非字符串
+            content = str(content)
         os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
         # newline="" 禁止 \n→\r\n 翻译（Windows 文本模式默认会改行尾，
         # 造成 git 'LF will be replaced by CRLF' 警告、diff 噪声）
@@ -168,6 +170,10 @@ def create_file_tools(base_dir: str | None = None) -> list[Tool]:
 
     # ── run_python ─────────────────────────────────────────
     def _run_python(code: str, timeout: int = DEFAULT_TIMEOUT) -> str:
+        try:
+            timeout = int(timeout)          # 容错：个别模型把 timeout 传成字符串
+        except (TypeError, ValueError):
+            timeout = DEFAULT_TIMEOUT
         timeout = max(1, min(timeout, MAX_TIMEOUT))
         try:
             r = subprocess.run(
