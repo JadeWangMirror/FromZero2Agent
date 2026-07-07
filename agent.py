@@ -255,11 +255,13 @@ class Agent:
         messages: list[MessageParam] = list(self._history)
         messages.append({"role": "user", "content": task})
 
-        tool_params = self.tools.to_params() if self.tools else None
-
         for _turn in range(self.max_turns):
             if callback:
                 callback("turn", {"turn": _turn + 1, "max": self.max_turns})
+            # 工具表每轮重新快照：本 run 中途通过 create_tool/update_tool/delete_tool
+            # 变动的工具，下一轮立刻对模型可见（schema 数组与 system prompt 工具清单同步，
+            # 实现"建完即调"）。to_params() 实时读 registry，开销可忽略。
+            tool_params = self.tools.to_params() if self.tools else None
             # ── 流式调用 + 实时回调 ──
             def on_stream(ev: StreamEvent) -> None:
                 if ev.type == "thinking_delta" and callback:
