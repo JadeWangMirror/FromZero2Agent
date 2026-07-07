@@ -232,6 +232,35 @@ def remember(content: str, tags: str = "") -> str:
             f"Run consolidate_memory to fold it into the cortex.")
 
 
+# 挣扎信号 —— 能力边界的原料(比"重复"更准的边界指纹)
+SIGNAL_TYPES = {"failure", "workaround", "effort", "correction"}
+
+
+def record_signal(kind: str, content: str, tags: str = "") -> str:
+    """记录一个"挣扎"信号事件:工具失败 / 手搓绕路 / 高耗 / 被纠正。
+
+    这些是"能力边界"的真正指纹(比词面重复准):边界常常表现为失败或绕路,
+    而非简单的重复。信号事件带 data["signal"] 标记,reflect pass 只看它们。
+    """
+    kind = kind if kind in SIGNAL_TYPES else "effort"
+    content = (content or "").strip()
+    if not content:
+        return "[!] record_signal: content is required."
+    bad = _scan(content)
+    if bad:
+        return f"[!] rejected ({bad}) — not saved."
+    g = _graph()
+    eid = _next_id(g, "e-")
+    now = _now()
+    g.add_node(eid, type="event",
+               data={"content": content,
+                     "tags": [t.strip() for t in (tags or "").split(",") if t.strip()],
+                     "signal": kind},
+               created=now, last_touched=now, consolidated=True, reflected=False)
+    _save_graph(g)
+    return f"[✓] signal {eid} ({kind}) recorded for reflection."
+
+
 def forget(node_id: str) -> str:
     """按 id 删除任意层节点(event/concept/intent)。"""
     g = _graph()
@@ -538,6 +567,72 @@ def satisfy_gap(tool_name: str, desc: str = "") -> int:
     return closed
 
 
+def reflect(summarize_fn) -> str:
+    """反思 pass: 从失败/绕路/高耗信号里识别真正的"能力边界"。
+
+    这是"意图浮现解决何时造工具"的核心 —— 边界的真正指纹是挣扎(失败/绕路),
+    不是词面重复。只看 signal 事件(合法重复的普通 event 永远不会进这里 →
+    天然不误报)。LLM 一次批处理调用判断 genuineness,成本可控。
+    产出的边界直接成 kind=capability_gap 的 intent(带 evidence),自动浮现。
+    """
+    g = _graph()
+    signals = [(n, d) for n, d in g.nodes(data=True)
+               if d.get("type") == "event"
+               and d.get("data", {}).get("signal")
+               and not d.get("reflected")]
+    if len(signals) < 2:
+        return ("Reflect: fewer than 2 struggle signals — not enough to infer a pattern. "
+                "Keep working; boundaries emerge from repeated struggle.")
+
+    sig_lines = []
+    for _, d in signals[:30]:
+        s = d["data"]
+        sig_lines.append(f"[{s.get('signal')}] {s.get('content', '')[:120]}")
+    prompt = (
+        "Below are signs that an AI agent struggled or worked around missing tools "
+        "(tool failures, manual multi-line Python workarounds, high-effort tasks). "
+        "Identify the GENUINE capability boundaries — missing capabilities that recurred "
+        "and are worth building a dedicated tool for. Ignore one-offs and legitimate "
+        "repetition. For each genuine boundary output exactly one line:\n"
+        "  BOUNDARY: <the missing capability, noun phrase> | because: <which signals show it>\n"
+        "Output nothing (no line) if there is no genuine recurring boundary.\n\n"
+        + "\n".join(sig_lines)
+    )
+    try:
+        raw = summarize_fn(prompt) or ""
+    except Exception:
+        raw = ""
+
+    new_b = 0
+    for line in raw.splitlines():
+        m = re.match(r"\s*BOUNDARY:\s*(.+?)\s*\|\s*because:\s*(.+)", line, re.I)
+        if not m:
+            continue
+        cap, evidence = m.group(1).strip(), m.group(2).strip()
+        cap_t = _tokens(cap)
+        # 去重:已有相似 intent 则跳过
+        dup = any(
+            d.get("type") == "intent"
+            and _jaccard(cap_t, _tokens(d["data"].get("statement", ""))) >= DEDUP_JACCARD
+            for _, d in g.nodes(data=True)
+        )
+        if dup:
+            continue
+        iid = _next_id(g, "i-")
+        g.add_node(iid, type="intent",
+                   data={"statement": cap, "status": "pending", "urgency": 4,
+                         "kind": "capability_gap", "evidence": evidence,
+                         "source": "reflection"},
+                   created=_now(), last_touched=_now())
+        new_b += 1
+
+    for n, _ in signals:
+        g.nodes[n]["reflected"] = True
+    _save_graph(g)
+    return (f"Reflect: assessed {len(signals)} struggle signal(s) → "
+            f"{new_b} capability boundary/boundaries surfaced.")
+
+
 # ── 涌现式读取(无 query,读图当前状态) ─────────────────
 
 def _pagerank(g: nx.DiGraph) -> dict:
@@ -604,7 +699,10 @@ def select_context(g: nx.DiGraph) -> str:
             kind = d["data"].get("kind", "task")
             covered = d["data"].get("covered_by")
             if kind == "capability_gap":
-                tag = "  ⚡ no tool covers → self_evolve/propose_tool"
+                ev = d["data"].get("evidence")
+                tag = "  ⚡ capability boundary → self_evolve/propose_tool"
+                if ev:
+                    tag += f"  [evidence: {ev[:70]}]"
             elif covered:
                 tag = f"  (covered by {covered})"
             else:

@@ -367,6 +367,8 @@ class Agent:
                     result = "No tools available."
                 else:
                     result = self.tools.execute(tu["name"], tu["input"])
+                # 捕获挣扎信号 → 记忆图(能力边界的原料,见 memory.reflect)
+                self._maybe_record_signal(tu["name"], tu.get("input"), result)
 
                 if callback:
                     callback("tool_result", {"name": tu["name"], "result": result})
@@ -617,18 +619,41 @@ class Agent:
                         f"multi-step pattern, consider self_evolve to assess a dedicated tool.")
         return None
 
-    def consolidate_memory(self) -> str:
-        """触发记忆折叠循环：event → concept → intent（涌现）。
+    def _maybe_record_signal(self, name: str, inp, result) -> None:
+        """工具调用后,若表现出"挣扎"(失败/手搓绕路),记一条信号事件。
 
-        没有 query；concept/intent 从图拓扑里算出来。把当前工具清单一并传入,
-        使未被覆盖的强 concept 结晶成 capability_gap —— 自进化的需求信号。
-        供 consolidate_memory 工具调用，也可由 /consolidate 命令直接触发。
-        返回报告 + 折叠后的涌现快照。
+        失败 = 能力边界的最强信号;run_python 多行代码 = 手搓绕路(没现成工具)。
+        这些只入记忆图、不进对话上下文,经 reflect pass 才结晶成边界。
         """
-        from memory import consolidate, context_block
+        try:
+            from memory import record_signal
+            r = str(result).lstrip().lower()
+            if r.startswith(("error", "tool execution error")):
+                record_signal("failure", f"{name} → {str(result).strip()[:160]}", tags=name)
+            elif name == "run_python":
+                code = (inp or {}).get("code", "") if isinstance(inp, dict) else ""
+                if isinstance(code, str):
+                    nonblank = [l for l in code.splitlines() if l.strip()]
+                    if len(nonblank) >= 6:  # 多行手搓 → 绕路候选
+                        record_signal("workaround",
+                                      f"manual python ({len(nonblank)} lines): "
+                                      f"{nonblank[0][:70]}",
+                                      tags="run_python")
+        except Exception:
+            pass
+
+    def consolidate_memory(self) -> str:
+        """触发记忆折叠循环：event → concept → intent（涌现）+ 反思(能力边界)。
+
+        consolidate: 相似 event → concept → 强 concept 结晶 intent(拓扑涌现)。
+        reflect: 从失败/绕路信号识别真正的能力边界(挣扎指纹,非词面重复)。
+        两者都一次 LLM 批处理,成本可控。返回报告 + 涌现快照。
+        """
+        from memory import consolidate, reflect, context_block
         tools = ([(name, t.description) for name, t in self.tools._tools.items()]
                  if self.tools else [])
         report = consolidate(self._llm_summarize, tools=tools)
+        report += "\n" + reflect(self._llm_summarize)
         return report + "\n" + context_block()
 
 
