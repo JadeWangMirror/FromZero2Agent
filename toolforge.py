@@ -609,32 +609,45 @@ class ToolForge:
 
     # ── 自进化:端到端编排 ──────────────────────────────────
 
-    def self_evolve(self, goal: str) -> str:
+    def self_evolve(self, goal: str = "") -> str:
         """引导一次完整的自进化评估：能力缺口 → 查重 → 判定 → 行动建议。
 
-        给 agent 一个单一入口来思考「我是否需要新工具」，
-        返回结构化的下一步，而不是凭直觉直接 create_tool。
+        goal 为空时,自动拉取记忆图里涌现的 capability_gap(LLM 判定的需求信号)
+        逐个评估 —— 这让 agent 不靠用户描述,而是从自己的重复行为里发现该造什么。
         """
         goal = (goal or "").strip()
-        if not goal:
-            return "Error: describe the goal / recurring pain point you keep hitting manually."
+        targets: list[str]
+        if goal:
+            targets = [goal]
+        else:
+            try:
+                from memory import capability_gaps
+                targets = [stmt for _, stmt in capability_gaps()[:3]]
+            except Exception:
+                targets = []
+            if not targets:
+                return ("No goal given and no capability gaps in memory yet. Either pass a "
+                        "goal, or accumulate memory first (remember events, then "
+                        "consolidate_memory) so gaps can emerge from your own behavior.")
 
-        parts = [
-            f"SELF-EVOLUTION ASSESSMENT for: {goal}",
-            "",
-            "1) CAPABILITY GAP — is this already covered?",
-            self.find_similar_tools(goal),
-            "",
-            "2) BUILD/SKIP DECISION:",
-            self.propose_tool(goal, reuse_signal="recurring"),
-            "",
-        ]
-        parts.append(
-            "3) NEXT STEP: follow the VERDICT above. If BUILD, write create_tool with "
-            "a precise description (states WHEN to use) + test_code, then review_tool "
-            "to verify quality. If SKIP, use the recommended existing tool or run_python."
+        out: list[str] = []
+        for t in targets:
+            out.append(f"SELF-EVOLUTION ASSESSMENT for: {t}")
+            out.append("")
+            out.append("1) CAPABILITY GAP — is this already covered?")
+            out.append(self.find_similar_tools(t))
+            out.append("")
+            out.append("2) BUILD/SKIP DECISION:")
+            out.append(self.propose_tool(t, reuse_signal="recurring"))
+            out.append("")
+            out.append("─" * 50)
+        out.append(
+            "NEXT STEP: for each verdict above — if BUILD, create_tool with a precise "
+            "description (states WHEN to use) + test_code, then review_tool. If SKIP, "
+            "use the recommended existing tool or run_python. You have authority to build "
+            "autonomously; do not wait for the user to specify the tool."
         )
-        return "\n".join(parts)
+        return "\n".join(out)
 
     # ── 内部:写盘 / 测试 / 校验 ───────────────────────────
 
@@ -813,11 +826,12 @@ class ToolForge:
             ),
             Tool(
                 "self_evolve",
-                "One-shot self-evolution assessment for a recurring goal/pain point. "
-                "Checks capability gap + BUILD/SKIP decision + next step. Call this when you "
-                "notice yourself repeating a multi-step operation and wondering if a tool would help.",
-                {"goal": {"type": "string", "description": "the recurring need or capability gap"}},
+                "Self-evolution assessment. With a goal: assess building a tool for it. "
+                "With NO goal: pull the capability gaps that emerged in memory (the agent's "
+                "own demand signal, LLM-judged) and assess each — BUILD/SKIP + next step. "
+                "This is the autonomous entry: call it when you detect your own repetition "
+                "(signaled in context) or when a capability gap appears in memory.",
+                {"goal": {"type": "string", "description": "the recurring need; omit to use memory's capability gaps", "default": ""}},
                 self.self_evolve,
-                required=["goal"],
             ),
         ]

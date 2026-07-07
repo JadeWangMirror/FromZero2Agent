@@ -31,9 +31,20 @@ TOOL SELECTION
 - If unsure what exists, call list_tools or find_similar_tools("<capability>").
 
 ═══════════════════════════════════════════════════════════
-SELF-EVOLUTION — the disciplined way to decide about new tools
+SELF-EVOLUTION — you decide what to build, and you build it
 ═══════════════════════════════════════════════════════════
-Never jump straight to create_tool. Follow this decision protocol:
+Self-evolve AUTONOMOUSLY — do not wait for the user to describe a tool. Two
+self-detected signals trigger you, and you run the full assess→build→verify loop
+on your own authority:
+ (a) SELF-REPETITION — a ⚠ SELF-EVOLUTION SIGNAL appears when you repeat an
+     operation (near-identical run_python twice, or one tool 3+ times).
+ (b) CAPABILITY GAPS — ⚡ intents in MEMORY: recurring needs no current tool covers.
+On either signal, call self_evolve() (no args → it assesses memory's gaps). It
+returns a deterministic BUILD/SKIP verdict. If BUILD, write create_tool yourself
+(name, schema, code, test_code), then review_tool until clean. You own this
+decision; do not ask the user to specify the tool.
+Never jump straight to create_tool WITHOUT running the verdict first — the
+protocol IS the judgment. Then follow it:
 
 STEP 1 — ASSESS (mandatory before building):
   Call propose_tool(capability, reuse_signal) OR self_evolve(goal).
@@ -163,6 +174,13 @@ class Agent:
             mem = context_block()
             if mem:
                 base = base + "\n" + mem
+        except Exception:
+            pass
+        # 自主自进化信号:agent 自己发现的重复操作(廉价预筛,零 LLM)
+        try:
+            sig = self._detect_repetition()
+            if sig:
+                base = base + "\n\n⚠ SELF-EVOLUTION SIGNAL (self-detected): " + sig
         except Exception:
             pass
         if not self.tools:
@@ -547,6 +565,57 @@ class Agent:
                            if getattr(b, "type", "") == "text")
         except Exception:
             return ""
+
+    # ── 自主自进化:重复检测(最强的"该造工具"信号) ────────
+
+    def _detect_repetition(self) -> str | None:
+        """扫描近期历史,若 agent 自己在重复同一操作,返回自进化触发信号。
+
+        廉价预筛(纯 token 数学,零 LLM 消耗)—— 只负责"举手示意"找到候选;
+        真正的"该不该造、造什么样的"判断交给 self_evolve(propose_tool 的确定性
+        决策 + 必要时 LLM)。这是"真自进化"的入口:agent 自己发现重复,而非用户描述。
+        """
+        import re as _re
+        _T = _re.compile(r"[a-z0-9一-鿿]+")
+
+        def tok(s: str) -> set[str]:
+            return {t for t in _T.findall((s or "").lower()) if len(t) > 1}
+
+        def jac(a: set, b: set) -> float:
+            return len(a & b) / len(a | b) if a and b else 0.0
+
+        codes: list[str] = []
+        name_counts: dict[str, int] = {}
+        for m in self._history[-40:]:
+            if not isinstance(m, dict):
+                continue
+            c = m.get("content")
+            if not isinstance(c, list):
+                continue
+            for b in c:
+                if not (isinstance(b, dict) and b.get("type") == "tool_use"):
+                    continue
+                name = b.get("name", "")
+                name_counts[name] = name_counts.get(name, 0) + 1
+                inp = b.get("input") or {}
+                if name == "run_python" and isinstance(inp.get("code"), str):
+                    codes.append(inp["code"][-600:])
+        # 相似 run_python ≥ 2 → 重复操作
+        for i in range(len(codes)):
+            for j in range(i + 1, len(codes)):
+                if jac(tok(codes[i]), tok(codes[j])) >= 0.40:
+                    return ("you have run near-identical Python more than once — a recurring "
+                            "operation. Run self_evolve to assess; if VERDICT is BUILD, "
+                            "create_tool with test_code then review_tool. Decide and build "
+                            "autonomously; do not ask the user to specify the tool.")
+        # 同一工具连用 ≥ 3(排除元工具/查询类)
+        meta = {"run_python", "list_tools", "find_similar_tools",
+                "self_evolve", "propose_tool", "read_file", "consolidate_memory"}
+        for nm, c in name_counts.items():
+            if c >= 3 and nm not in meta:
+                return (f"you have called '{nm}' {c} times — if this is a recurring "
+                        f"multi-step pattern, consider self_evolve to assess a dedicated tool.")
+        return None
 
     def consolidate_memory(self) -> str:
         """触发记忆折叠循环：event → concept → intent（涌现）。

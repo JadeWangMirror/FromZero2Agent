@@ -320,14 +320,6 @@ def _decay_and_prune(g: nx.DiGraph) -> int:
     return pruned
 
 
-def _covering_tool(concept_toks: set, tool_toks: list[tuple[str, set]]) -> str | None:
-    """返回覆盖该 concept 的工具名;无则 None。记忆↔自进化的接口。"""
-    for name, ttoks in tool_toks:
-        if _jaccard(concept_toks, ttoks) >= COVERAGE_JACCARD:
-            return name
-    return None
-
-
 def consolidate(summarize_fn, tools=None) -> str:
     """折叠循环: accumulation → completion → compression → decay。
 
@@ -348,29 +340,44 @@ def consolidate(summarize_fn, tools=None) -> str:
     foldable = [c for c in clusters if len(c) >= MIN_CLUSTER]
 
     statements: dict[int, str] = {}
+    covered: dict[int, str] = {}        # cluster idx → 覆盖它的工具名(LLM 判定)
     if foldable:
         blocks = []
         for i, cl in enumerate(foldable, 1):
             sample = "\n".join(f"  - {g.nodes[n]['data'].get('content', '')[:140]}"
                                for n in cl[:10])
             blocks.append(f"[{i}]\n{sample}")
+        # 有工具清单时,让 LLM 在同一次折叠调用里顺带判定覆盖(搭便车,零额外消耗),
+        # 替代脆的 Jaccard 阈值 —— 语义判断交给 LLM。
+        tool_inv = ""
+        fmt = "one line each, no preamble."
+        if tool_toks:
+            tool_inv = "\n\nExisting tools:\n" + "\n".join(
+                f"- {name}: {(desc or '').splitlines()[0][:80]}"
+                for name, desc in (tools or []) if name) or ""
+            fmt = ("one line each, format: 'N. <concept statement> | tool: <toolname>' "
+                   "where <toolname> is the EXISTING tool that already covers this concept, "
+                   "or 'none' if uncovered. no preamble.")
         prompt = (
-            "Below are numbered clusters of recurring observations from past "
-            "sessions. For EACH cluster, write ONE concise concept statement: a "
-            "general fact, preference, or pattern they all exemplify (<=1 sentence). "
-            "Output a numbered list matching the cluster numbers, one line each, "
-            "no preamble.\n\n" + "\n".join(blocks)
+            "Below are numbered clusters of recurring observations from past sessions. "
+            "For EACH cluster, write ONE concise concept statement: a general fact, "
+            "preference, or pattern they all exemplify (<=1 sentence). Output a numbered "
+            "list matching the cluster numbers, " + fmt + "\n\n" + "\n".join(blocks)
+            + tool_inv
         )
         try:
             raw = summarize_fn(prompt) or ""
         except Exception:
             raw = ""
         for line in raw.splitlines():
-            m = re.match(r"\s*\(?\s*(\d+)[\).:\-]\s*(.+)", line)
+            m = re.match(r"\s*\(?\s*(\d+)[\).:\-]\s*(.+?)(?:\s*\|\s*tool:\s*(.+))?\s*$", line)
             if m:
                 idx = int(m.group(1))
                 if 1 <= idx <= len(foldable):
                     statements[idx] = m.group(2).strip()
+                    t = (m.group(3) or "").strip()
+                    if tool_toks and t and t.lower() not in ("none", "n/a", "-", ""):
+                        covered[idx] = t
 
     new_c = merged_c = 0
     for i, cl in enumerate(foldable, 1):
@@ -385,6 +392,7 @@ def consolidate(summarize_fn, tools=None) -> str:
                     st, _tokens(cd["data"].get("statement", ""))) >= DEDUP_JACCARD:
                 target = cn
                 break
+        cov = covered.get(i)
         if target is not None:
             for src in cl:
                 if g.has_edge(src, target):
@@ -393,12 +401,16 @@ def consolidate(summarize_fn, tools=None) -> str:
                     g.add_edge(src, target, type=DERIVED_FROM, weight=1.0)
             g.nodes[target]["data"]["strength"] = \
                 g.nodes[target]["data"].get("strength", 0) + len(cl)
+            if cov:
+                g.nodes[target]["data"]["covered_by"] = cov
             g.nodes[target]["last_touched"] = _now()
             merged_c += 1
         else:
             cid = _next_id(g, "c-")
-            g.add_node(cid, type="concept",
-                       data={"statement": stmt, "strength": len(cl)},
+            cdata = {"statement": stmt, "strength": len(cl)}
+            if cov:
+                cdata["covered_by"] = cov
+            g.add_node(cid, type="concept", data=cdata,
                        created=_now(), last_touched=_now(), consolidated=True)
             for src in cl:
                 g.add_edge(src, cid, type=DERIVED_FROM, weight=1.0)
@@ -414,14 +426,14 @@ def consolidate(summarize_fn, tools=None) -> str:
         strength = _concept_strength(g, n)
         if strength >= INTENT_THRESHOLD and not _has_intent_for(g, n):
             stmt = d["data"]["statement"]
-            covered = _covering_tool(_tokens(stmt), tool_toks) if tool_toks else None
+            covered_by = d["data"].get("covered_by")   # LLM 在折叠时判定的覆盖
             # 有工具清单时:被覆盖=served, 未覆盖=capability_gap; 无清单=task
-            kind = "served" if covered else ("capability_gap" if tool_toks else "task")
+            kind = "served" if covered_by else ("capability_gap" if tool_toks else "task")
             iid = _next_id(g, "i-")
             idata = {"statement": stmt, "status": "pending",
                      "urgency": min(5, 2 + strength // 2), "kind": kind}
-            if covered:
-                idata["covered_by"] = covered
+            if covered_by:
+                idata["covered_by"] = covered_by
             g.add_node(iid, type="intent", data=idata,
                        created=_now(), last_touched=_now())
             g.add_edge(iid, n, type=DERIVED_FROM, weight=1.0)
