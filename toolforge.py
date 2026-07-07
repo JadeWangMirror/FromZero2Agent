@@ -181,7 +181,11 @@ class ToolForge:
                 return (f"Error: test FAILED, tool NOT created:\n{test_err}\n\n"
                         f"Fix the code so the test passes, then retry create_tool.")
 
-        # 注册
+        # 注册（注册前必须归一化 schema：_write_tool 只把归一化结果写进
+        # meta.json，不会回传；若用 LLM 误传的完整 schema {type:object,properties:...}
+        # 注册，坏嵌套会立刻进 registry，下一次请求被 DeepSeek 全量校验 → 400。
+        # 重启才恢复，因为重启走 _register_from_disk 读的是已归一化的 meta.json。）
+        parameters = self._normalize_parameters(parameters)
         required = self._infer_required(parameters)
         self.registry.register(Tool(name, description, parameters, fn, required))
         self._log(f"create_tool {name}")
@@ -219,6 +223,8 @@ class ToolForge:
 
         # import 成功即部署新代码；测试结果作为告警而非阻断
         # （测试可能因行为变更而过时，不应锁死更新）
+        # 注册前归一化 schema（与 create_tool 同理：_write_tool 只写盘不回传）
+        new_params = self._normalize_parameters(new_params)
         required = self._infer_required(new_params)
         self.registry.register(Tool(name, new_desc, new_params, fn, required))
 
