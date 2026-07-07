@@ -46,25 +46,29 @@ class _SimpleBlock:
 
 
 # ── DSML 工具调用兜底解析 ──────────────────────────────────
-# 某些 DeepSeek 流式端点不把工具调用转成原生 Anthropic tool_use 块,而是把模型
-# 原生的 DSML(DeepSeek Markup Language)工具调用文本塞进 text:
+# 某些 DeepSeek 流式端点(偶发)不把工具调用转成原生 Anthropic tool_use 块,而是
+# 把模型原生的 DSML 工具调用文本塞进 text 或 thinking:
 #   < | DSML | tool_calls>
 #     < | DSML | invoke name="read_file">
 #       < | DSML | parameter name="path" string="true">/x/y</ | DSML | parameter>
 #     </ | DSML | invoke>
 #   </ | DSML | tool_calls>
 # 不解析的话,工具永远不会被执行 → agent 卡死/会话断开。这里把它转回 tool_use 块。
-# 正则容忍空格变体(< | DSML | 与 <|DSML| 都认)。
+# 鲁棒策略:不依赖 DSML 外壳 —— 抓 invoke/parameter 骨架即可,前缀可选、单双引号
+# 皆可、扫描 text 与 thinking 两处(之前只扫 text,thinking 里的调用会被静默丢弃)。
 
+_DSML_PREF = r"(?:\|\s*DSML\s*\|\s*)?"     # 可选的 "| DSML | " 外壳
 _DSML_OPEN_INVOKE = re.compile(
-    r"<\s*\|\s*DSML\s*\|\s*invoke\s+name\s*=\s*\"([^\"]+)\"\s*>", re.S)
+    rf"<\s*{_DSML_PREF}invoke\s+name\s*=\s*[\"']([^\"']+)[\"']\s*>", re.S)
 _DSML_CLOSE_INVOKE = re.compile(
-    r"<\s*/\s*\|\s*DSML\s*\|\s*invoke\s*>", re.S)
+    rf"<\s*/\s*{_DSML_PREF}invoke\s*>", re.S)
 _DSML_OPEN_PARAM = re.compile(
-    r"<\s*\|\s*DSML\s*\|\s*parameter\s+name\s*=\s*\"([^\"]+)\"[^>]*>", re.S)
+    rf"<\s*{_DSML_PREF}parameter\s+name\s*=\s*[\"']([^\"']+)[\"'][^>]*>", re.S)
 _DSML_CLOSE_PARAM = re.compile(
-    r"<\s*/\s*\|\s*DSML\s*\|\s*parameter\s*>", re.S)
-_DSML_ANY = re.compile(r"<\s*\|\s*DSML\s*\|")
+    rf"<\s*/\s*{_DSML_PREF}parameter\s*>", re.S)
+# 检测信号: DSML 外壳 / invoke name= / tool_calls —— 任一出现即认定有工具调用文本
+_DSML_ANY = re.compile(
+    rf"<\s*(?:{_DSML_PREF})(?:invoke\s+name\s*=|tool_calls\b)", re.I)
 
 
 def _parse_dsml_tool_calls(text: str) -> list[dict]:
@@ -108,16 +112,74 @@ def _dsml_to_tool_use_blocks(text: str) -> tuple[list[dict], str] | None:
     return blocks, pre
 
 
+def _dsml_debug_log(raw_text: str, block_types: list, has_native: bool,
+                    parsed: list) -> None:
+    """每次出现 DSML 就把原文落盘 —— 用于定位"仍打断会话"的真实形态
+    (格式是否不同?是否与原生 tool_use 共存?解析为何没命中?)。失败静默。"""
+    import os
+    import time as _t
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "dsml_debug.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n===== {_t.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            f.write(f"block_types={block_types} has_native_tool_use={has_native} "
+                    f"parsed_calls={len(parsed)}\n")
+            f.write(f"raw_text ({len(raw_text)} chars):\n{raw_text[:4000]}\n")
+            if parsed:
+                f.write(f"parsed: {parsed}\n")
+    except Exception:
+        pass
+
+
+def _log_partial_dsml(blocks) -> None:
+    """流式被异常打断时,若已收到含工具调用文本的片段,落盘定位。
+    否则 _finalize_blocks 根本没机会运行,DSML 永远抓不到。失败静默。"""
+    try:
+        bs = blocks or []
+        raw = "".join(
+            (b.get("text", "") or b.get("thinking", "") or "")
+            for b in bs if isinstance(b, dict))
+        if raw and _DSML_ANY.search(raw):
+            _dsml_debug_log("[stream interrupted — partial]\n" + raw[:4000],
+                            [b.get("type") for b in bs], False, [])
+    except Exception:
+        pass
+
+
 def _finalize_blocks(blocks: list[dict]) -> list[dict]:
-    """过滤 thinking 块;且当端点没吐原生 tool_use、却把工具调用以 DSML 文本
-    塞进 text 时,解析回 tool_use 块。有原生 tool_use 则完全不动。"""
+    """过滤 thinking 块;处理 DSML 工具调用文本。
+
+    text 或 thinking 里出现工具调用文本(无论是否与原生 tool_use 共存、解析是否成功):
+      1) 落盘原文(见 _dsml_debug_log)用于定位;
+      2) 剥掉该噪声段(不把 DSML 当回复存进历史/显示);
+      3) 若无原生 tool_use 且解析成功 → 追加解析出的 tool_use 块。
+    无则原样返回(原生路径零干扰)。"""
     final = [b for b in blocks if b and b.get("type") in ("text", "tool_use")]
-    if not any(b.get("type") == "tool_use" for b in final):
-        txt = "".join(b.get("text", "") for b in final if b.get("type") == "text")
-        conv = _dsml_to_tool_use_blocks(txt)
-        if conv is not None:
-            tu, pre = conv
-            final = ([{"type": "text", "text": pre}] if pre else []) + tu
+    txt = "".join(b.get("text", "") for b in final if b.get("type") == "text")
+    think_txt = "".join(b.get("thinking", "") for b in blocks
+                        if isinstance(b, dict) and b.get("type") == "thinking")
+    has_native = any(b.get("type") == "tool_use" for b in final)
+    # 优先扫 text;text 里没有才看 thinking(模型偶发把工具调用塞进思考)
+    if _DSML_ANY.search(txt):
+        scan, source = txt, "text"
+    elif _DSML_ANY.search(think_txt):
+        scan, source = think_txt, "thinking"
+    else:
+        scan, source = "", ""
+    if scan:
+        parsed = _parse_dsml_tool_calls(scan)
+        _dsml_debug_log(f"[source={source}]\n--TEXT--\n{txt}\n--THINKING--\n{think_txt}",
+                        [b.get("type") for b in blocks], has_native, parsed)
+        first = _DSML_ANY.search(scan)
+        # text 里出现 → 保留 DSML 之前的干净文本;thinking 里出现 → 保留正文 text
+        pre = (scan[:first.start()] if source == "text" else txt).strip()
+        tu = [b for b in final if b.get("type") == "tool_use"]
+        if parsed and not has_native:
+            tu = tu + [{"type": "tool_use", "id": f"dsml-{i}",
+                        "name": c["name"], "input": c["input"]}
+                       for i, c in enumerate(parsed)]
+        final = ([{"type": "text", "text": pre}] if pre else []) + tu
     return final
 
 
@@ -285,14 +347,17 @@ class LLMClient:
                     if attempt < self.max_retries - 1:
                         time.sleep(self.retry_backoff * (2 ** attempt))
                         continue
+                _log_partial_dsml(getattr(self, "_dbg_stream_blocks", None))
                 raise
             except (httpx.TimeoutException, httpx.TransportError) as e:
                 last_exc = e
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_backoff * (2 ** attempt))
                     continue
+                _log_partial_dsml(getattr(self, "_dbg_stream_blocks", None))
                 raise
         assert last_exc is not None
+        _log_partial_dsml(getattr(self, "_dbg_stream_blocks", None))
         raise last_exc
 
     def _http_error(self, resp, body: dict) -> httpx.HTTPStatusError:
@@ -335,6 +400,7 @@ class LLMClient:
     def _stream_once(self, body, headers, on_event) -> _SimpleMsg:
         """单次流式请求 + SSE 解析。"""
         blocks: list[dict] = []
+        self._dbg_stream_blocks = blocks  # 异常时 send_stream 可据此抓 DSML 片段
         cur_block: dict | None = None
         cur_index: int = -1
         tool_input_buf: str = ""

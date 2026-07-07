@@ -930,6 +930,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         )
         self._think_box.mount(self._think_text)
         self._has_think = False
+        self._think_shown = 0            # 新一轮思考:重置节流计数
 
         # spinner
         self._start_spinner()
@@ -1035,12 +1036,17 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
 
     def _set_think(self, content: str) -> None:
         self._has_think = True
-        if self._think_text:
-            if len(content) > 2000:
-                content = content[:2000] + "\n..."
-            # RichLog 增量写入 — 清空后重写完整内容
-            self._think_text.clear()
-            self._think_text.write(f"[dim]{_esc(content)}[/]")
+        if not self._think_text:
+            return
+        # 节流:增量太小就跳过重绘 —— 逐 token 全量 clear+write 是 O(n²),长思考时
+        # 会拖慢 UI 直到看起来"卡住不更新"。末尾几十字略迟,无伤大雅。
+        if len(content) - getattr(self, "_think_shown", 0) < 40:
+            return
+        # 显示上限放宽(原 2000 太小,长思考一过 2000 就截断 → 像卡住);RichLog 可滚动
+        shown = content if len(content) <= 10000 else content[:10000] + "\n…(truncated)"
+        self._think_text.clear()
+        self._think_text.write(f"[dim]{_esc(shown)}[/]")
+        self._think_shown = len(content)
 
     def _done(self) -> None:
         if hasattr(self, "_spin_timer") and self._spin_timer:

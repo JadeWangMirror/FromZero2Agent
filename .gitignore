@@ -20,3 +20,4 @@ tools/custom/_usage.json
 /_*.py
 /MIRROR.md
 /config.json
+dsml_debug.log
