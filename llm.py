@@ -48,27 +48,33 @@ class _SimpleBlock:
 # ── DSML 工具调用兜底解析 ──────────────────────────────────
 # 某些 DeepSeek 流式端点(偶发)不把工具调用转成原生 Anthropic tool_use 块,而是
 # 把模型原生的 DSML 工具调用文本塞进 text 或 thinking:
-#   < | DSML | tool_calls>
-#     < | DSML | invoke name="read_file">
-#       < | DSML | parameter name="path" string="true">/x/y</ | DSML | parameter>
-#     </ | DSML | invoke>
-#   </ | DSML | tool_calls>
+#   <｜DSML｜tool_calls>          ← 注意竖线是全角 ｜(U+FF5C),不是半角 |
+#     <｜DSML｜invoke name="read_file">
+#       <｜DSML｜parameter name="path" string="true">/x/y</｜DSML｜parameter>
+#     </｜DSML｜invoke>
+#   </｜DSML｜tool_calls>
 # 不解析的话,工具永远不会被执行 → agent 卡死/会话断开。这里把它转回 tool_use 块。
-# 鲁棒策略:不依赖 DSML 外壳 —— 抓 invoke/parameter 骨架即可,前缀可选、单双引号
-# 皆可、扫描 text 与 thinking 两处(之前只扫 text,thinking 里的调用会被静默丢弃)。
+# 关键坑:端点实际吐的是【全角】控制符(｜ < ／ > 等 CJK 渲染),早期正则只认半角 |,
+# 检测永远失败、DSML 漏成文本 —— 这就是"DSML 打断会话"的真凶。故全部用字符类兼容半/全角。
+# 同时:前缀可选、单双引号皆可、扫 text 与 thinking 两处。
 
-_DSML_PREF = r"(?:\|\s*DSML\s*\|\s*)?"     # 可选的 "| DSML | " 外壳
+_LB = r"[<＜]"      # <  或 全角＜(U+FF1C)
+_RB = r"[>＞]"      # >  或 全角＞(U+FF1E)
+_BS = r"[/／]"      # /  或 全角／(U+FF0F)
+_PV = r"[|｜]+"     # | 或 全角｜(U+FF5C),可多个(端点实际吐 ｜｜DSML｜｜ 双竖线)
+_SP = r"[\s　]*"    # 空白(含全角空格 U+3000)
+_DSML_PREF = rf"(?:{_PV}{_SP}DSML{_SP}{_PV}{_SP})?"   # 可选的 "｜DSML｜" 外壳
 _DSML_OPEN_INVOKE = re.compile(
-    rf"<\s*{_DSML_PREF}invoke\s+name\s*=\s*[\"']([^\"']+)[\"']\s*>", re.S)
+    rf"{_LB}{_SP}{_DSML_PREF}invoke\s+name\s*=\s*[\"']([^\"']+)[\"']\s*{_RB}", re.S)
 _DSML_CLOSE_INVOKE = re.compile(
-    rf"<\s*/\s*{_DSML_PREF}invoke\s*>", re.S)
+    rf"{_LB}{_SP}{_BS}{_SP}{_DSML_PREF}invoke\s*{_RB}", re.S)
 _DSML_OPEN_PARAM = re.compile(
-    rf"<\s*{_DSML_PREF}parameter\s+name\s*=\s*[\"']([^\"']+)[\"'][^>]*>", re.S)
+    rf"{_LB}{_SP}{_DSML_PREF}parameter\s+name\s*=\s*[\"']([^\"']+)[\"'][^>＞]*{_RB}", re.S)
 _DSML_CLOSE_PARAM = re.compile(
-    rf"<\s*/\s*{_DSML_PREF}parameter\s*>", re.S)
+    rf"{_LB}{_SP}{_BS}{_SP}{_DSML_PREF}parameter\s*{_RB}", re.S)
 # 检测信号: DSML 外壳 / invoke name= / tool_calls —— 任一出现即认定有工具调用文本
 _DSML_ANY = re.compile(
-    rf"<\s*(?:{_DSML_PREF})(?:invoke\s+name\s*=|tool_calls\b)", re.I)
+    rf"{_LB}{_SP}(?:{_DSML_PREF})(?:invoke\s+name\s*=|tool_calls\b)", re.I)
 
 
 def _parse_dsml_tool_calls(text: str) -> list[dict]:
