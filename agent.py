@@ -85,6 +85,10 @@ prefrontal intents), read by graph topology each turn. You do NOT query it.
   they crystallized because the topology accumulated the conditions for them.
   Honor surfaced intents: act on pending ones, then update_intent(id, status).
 - update_intent(intent_id, status): mark an intent in_progress/done/skipped.
+- Intents tagged ⚡ (capability gap) are recurring operations no current tool
+  covers — prime self_evolve/propose_tool candidates. Building the tool
+  (create_tool) auto-satisfies the gap: memory is the demand sensor, ToolForge
+  the supply. This is how you notice your own repetitive work and close the loop.
 Do not try to read/search memory — it is already in front of you each turn.
 
 ═══════════════════════════════════════════════════════════
@@ -547,11 +551,15 @@ class Agent:
     def consolidate_memory(self) -> str:
         """触发记忆折叠循环：event → concept → intent（涌现）。
 
-        没有 query；concept/intent 从图拓扑里算出来。供 consolidate_memory 工具调用，
-        也可由 /consolidate 命令直接触发。返回报告 + 折叠后的涌现快照。
+        没有 query；concept/intent 从图拓扑里算出来。把当前工具清单一并传入,
+        使未被覆盖的强 concept 结晶成 capability_gap —— 自进化的需求信号。
+        供 consolidate_memory 工具调用，也可由 /consolidate 命令直接触发。
+        返回报告 + 折叠后的涌现快照。
         """
         from memory import consolidate, context_block
-        report = consolidate(self._llm_summarize)
+        tools = ([(name, t.description) for name, t in self.tools._tools.items()]
+                 if self.tools else [])
+        report = consolidate(self._llm_summarize, tools=tools)
         return report + "\n" + context_block()
 
 

@@ -189,7 +189,20 @@ class ToolForge:
         required = self._infer_required(parameters)
         self.registry.register(Tool(name, description, parameters, fn, required))
         self._log(f"create_tool {name}")
+        # 记忆↔自进化闭环:新能力入图 + 自动满足它覆盖的能力缺口
+        closed = 0
+        try:
+            import memory as _mem
+            _mem.remember(
+                f"acquired tool '{name}': {description.splitlines()[0][:140]}",
+                tags="tool,capability",
+            )
+            closed = _mem.satisfy_gap(name, description)
+        except Exception:
+            pass
         status = f"Tool '{name}' created and registered."
+        if closed:
+            status += f" Also satisfied {closed} memory capability gap(s)."
         if not test_code.strip():
             status += " (no test provided — not validated)"
         return status

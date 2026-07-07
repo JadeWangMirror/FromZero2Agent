@@ -47,6 +47,7 @@ STRICT_JACCARD = 0.30         # 或: 单词重叠但 Jaccard 占主导 → 同�
 MIN_CLUSTER = 2               # 至少几条相似事件才折叠成 concept
 INTENT_THRESHOLD = 3          # concept 支撑度 ≥ 此值 → 结晶 intent
 DEDUP_JACCARD = 0.45          # concept 间相似到此程度 → 合并(compression)
+COVERAGE_JACCARD = 0.12       # concept 与某工具描述 Jaccard ≥ 此值 → 视为被该工具覆盖
 DECAY_HALF_LIFE_H = 240.0     # 边权半衰期(10 天)
 PRUNE_WEIGHT = 0.05           # 边权低于此值 → 剪掉
 
@@ -319,13 +320,25 @@ def _decay_and_prune(g: nx.DiGraph) -> int:
     return pruned
 
 
-def consolidate(summarize_fn) -> str:
+def _covering_tool(concept_toks: set, tool_toks: list[tuple[str, set]]) -> str | None:
+    """返回覆盖该 concept 的工具名;无则 None。记忆↔自进化的接口。"""
+    for name, ttoks in tool_toks:
+        if _jaccard(concept_toks, ttoks) >= COVERAGE_JACCARD:
+            return name
+    return None
+
+
+def consolidate(summarize_fn, tools=None) -> str:
     """折叠循环: accumulation → completion → compression → decay。
 
     summarize_fn(prompt)->str 由 Agent 注入 LLM(批量抽象 concept 语句)。
+    tools=[(name,desc),...] 当前工具清单 —— 用于覆盖判定:未被任何工具覆盖的
+    强 concept 结晶成 kind=capability_gap 的 intent,作为自进化的需求信号。
     返回人类可读报告。涌现发生在此:concept 与 intent 不被查询,而是被算出。
     """
     g = _graph()
+    tool_toks = [(name, _tokens(name.replace("_", " ") + " " + (desc or "")))
+                 for name, desc in (tools or [])]
     events = [(n, d) for n, d in g.nodes(data=True)
               if d.get("type") == "event" and not d.get("consolidated")]
 
@@ -393,21 +406,28 @@ def consolidate(summarize_fn) -> str:
         for src in cl:
             g.nodes[src]["consolidated"] = True
 
-    # ── completion: intent 结晶(涌现) ──
-    new_i = 0
+    # ── completion: intent 结晶(涌现) + 能力缺口判定 ──
+    new_i = gaps = 0
     for n, d in list(g.nodes(data=True)):
         if d.get("type") != "concept":
             continue
         strength = _concept_strength(g, n)
         if strength >= INTENT_THRESHOLD and not _has_intent_for(g, n):
+            stmt = d["data"]["statement"]
+            covered = _covering_tool(_tokens(stmt), tool_toks) if tool_toks else None
+            # 有工具清单时:被覆盖=served, 未覆盖=capability_gap; 无清单=task
+            kind = "served" if covered else ("capability_gap" if tool_toks else "task")
             iid = _next_id(g, "i-")
-            g.add_node(iid, type="intent",
-                       data={"statement": d["data"]["statement"],
-                             "status": "pending",
-                             "urgency": min(5, 2 + strength // 2)},
+            idata = {"statement": stmt, "status": "pending",
+                     "urgency": min(5, 2 + strength // 2), "kind": kind}
+            if covered:
+                idata["covered_by"] = covered
+            g.add_node(iid, type="intent", data=idata,
                        created=_now(), last_touched=_now())
             g.add_edge(iid, n, type=DERIVED_FROM, weight=1.0)
             new_i += 1
+            if kind == "capability_gap":
+                gaps += 1
 
     pruned = _decay_and_prune(g)
     _save_graph(g)
@@ -417,9 +437,49 @@ def consolidate(summarize_fn) -> str:
         parts.append(f"{merged_c} reinforced")
     if new_i:
         parts.append(f"{new_i} intent(s) crystallized")
+    if gaps:
+        parts.append(f"{gaps} capability gap(s)")
     if pruned:
         parts.append(f"{pruned} decayed node(s) pruned")
     return ", ".join(parts) + "."
+
+
+# ── 记忆↔自进化 接口 ────────────────────────────────────
+
+def capability_gaps() -> list[tuple[str, str]]:
+    """当前未被工具覆盖、未完成的能力缺口 [(intent_id, statement)]。
+    自进化的需求信号 —— 这些是重复出现但无现成工具的操作。"""
+    g = _graph()
+    return [(n, d["data"].get("statement", ""))
+            for n, d in g.nodes(data=True)
+            if d.get("type") == "intent"
+            and d["data"].get("kind") == "capability_gap"
+            and d["data"].get("status") != "done"]
+
+
+def satisfy_gap(tool_name: str, desc: str = "") -> int:
+    """新工具上线 → 把它覆盖的 capability_gap intent 标记 done + covered_by。
+
+    供需闭环:create_tool 后调用,让图反映"这个缺口已被新工具补上"。
+    返回闭环的缺口数。
+    """
+    g = _graph()
+    ttoks = _tokens(tool_name.replace("_", " ") + " " + (desc or ""))
+    if not ttoks:
+        return 0
+    closed = 0
+    for n, d in g.nodes(data=True):
+        if (d.get("type") == "intent"
+                and d["data"].get("kind") == "capability_gap"
+                and d["data"].get("status") != "done"
+                and _jaccard(_tokens(d["data"].get("statement", "")), ttoks) >= COVERAGE_JACCARD):
+            d["data"]["status"] = "done"
+            d["data"]["covered_by"] = tool_name
+            d["last_touched"] = _now()
+            closed += 1
+    if closed:
+        _save_graph(g)
+    return closed
 
 
 # ── 涌现式读取(无 query,读图当前状态) ─────────────────
@@ -471,11 +531,25 @@ def select_context(g: nx.DiGraph) -> str:
     nI = sum(1 for _, d in g.nodes(data=True) if d.get("type") == "intent")
 
     lines = ["", "═ MEMORY (emergent — graph topology, not retrieval) " + "═" * 8]
+    gap_n = sum(1 for _, d in intents if d["data"].get("kind") == "capability_gap")
     if intents:
-        lines.append(f"▸ EMERGENT INTENTS ({nI} crystallized from recurring patterns):")
+        hdr = f"▸ EMERGENT INTENTS ({nI} crystallized"
+        if gap_n:
+            hdr += f"; {gap_n} capability gap(s) ⚡"
+        hdr += "):"
+        lines.append(hdr)
         for _, d in intents:
+            kind = d["data"].get("kind", "task")
+            covered = d["data"].get("covered_by")
+            if kind == "capability_gap":
+                tag = "  ⚡ no tool covers → self_evolve/propose_tool"
+            elif covered:
+                tag = f"  (covered by {covered})"
+            else:
+                tag = ""
             lines.append(f"   • [{d['data'].get('status', '?')}] "
-                         f"{d['data'].get('statement', '')}  (urg={d['data'].get('urgency', 1)})")
+                         f"{d['data'].get('statement', '')}  "
+                         f"(urg={d['data'].get('urgency', 1)}){tag}")
     if events:
         lines.append("▸ IMMEDIATE (recent events):")
         for _, d in events:
