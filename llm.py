@@ -6,6 +6,7 @@ LLM 客户端 — 封装 Anthropic 协议调用（DeepSeek 兼容端点）。
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -42,6 +43,82 @@ class _SimpleBlock:
         self.id = d.get("id", "")
         self.name = d.get("name", "")
         self.input = d.get("input", {})
+
+
+# ── DSML 工具调用兜底解析 ──────────────────────────────────
+# 某些 DeepSeek 流式端点不把工具调用转成原生 Anthropic tool_use 块,而是把模型
+# 原生的 DSML(DeepSeek Markup Language)工具调用文本塞进 text:
+#   < | DSML | tool_calls>
+#     < | DSML | invoke name="read_file">
+#       < | DSML | parameter name="path" string="true">/x/y</ | DSML | parameter>
+#     </ | DSML | invoke>
+#   </ | DSML | tool_calls>
+# 不解析的话,工具永远不会被执行 → agent 卡死/会话断开。这里把它转回 tool_use 块。
+# 正则容忍空格变体(< | DSML | 与 <|DSML| 都认)。
+
+_DSML_OPEN_INVOKE = re.compile(
+    r"<\s*\|\s*DSML\s*\|\s*invoke\s+name\s*=\s*\"([^\"]+)\"\s*>", re.S)
+_DSML_CLOSE_INVOKE = re.compile(
+    r"<\s*/\s*\|\s*DSML\s*\|\s*invoke\s*>", re.S)
+_DSML_OPEN_PARAM = re.compile(
+    r"<\s*\|\s*DSML\s*\|\s*parameter\s+name\s*=\s*\"([^\"]+)\"[^>]*>", re.S)
+_DSML_CLOSE_PARAM = re.compile(
+    r"<\s*/\s*\|\s*DSML\s*\|\s*parameter\s*>", re.S)
+_DSML_ANY = re.compile(r"<\s*\|\s*DSML\s*\|")
+
+
+def _parse_dsml_tool_calls(text: str) -> list[dict]:
+    """从文本提取所有 DSML invoke → [{name, input}, ...]。无则空。"""
+    calls: list[dict] = []
+    pos = 0
+    while True:
+        mo = _DSML_OPEN_INVOKE.search(text, pos)
+        if not mo:
+            break
+        cmo = _DSML_CLOSE_INVOKE.search(text, mo.end())
+        if not cmo:
+            break
+        body = text[mo.end():cmo.start()]
+        params: dict = {}
+        for pm in _DSML_OPEN_PARAM.finditer(body):
+            cpm = _DSML_CLOSE_PARAM.search(body, pm.end())
+            raw = (body[pm.end():cpm.start()] if cpm else "").strip()
+            try:
+                params[pm.group(1)] = json.loads(raw)   # 数值/布尔自动还原
+            except (json.JSONDecodeError, ValueError):
+                params[pm.group(1)] = raw               # 字符串原样
+        calls.append({"name": mo.group(1), "input": params})
+        pos = cmo.end()
+    return calls
+
+
+def _dsml_to_tool_use_blocks(text: str) -> tuple[list[dict], str] | None:
+    """text 含 DSML 工具调用 → (tool_use 块列表, DSML 前的自然语言前缀);
+    否则 None(走原生路径)。"""
+    if not _DSML_ANY.search(text):
+        return None
+    calls = _parse_dsml_tool_calls(text)
+    if not calls:
+        return None
+    first = _DSML_ANY.search(text)
+    pre = text[:first.start()].strip() if first else ""
+    blocks = [{"type": "tool_use", "id": f"dsml-{i}",
+               "name": c["name"], "input": c["input"]}
+              for i, c in enumerate(calls)]
+    return blocks, pre
+
+
+def _finalize_blocks(blocks: list[dict]) -> list[dict]:
+    """过滤 thinking 块;且当端点没吐原生 tool_use、却把工具调用以 DSML 文本
+    塞进 text 时,解析回 tool_use 块。有原生 tool_use 则完全不动。"""
+    final = [b for b in blocks if b and b.get("type") in ("text", "tool_use")]
+    if not any(b.get("type") == "tool_use" for b in final):
+        txt = "".join(b.get("text", "") for b in final if b.get("type") == "text")
+        conv = _dsml_to_tool_use_blocks(txt)
+        if conv is not None:
+            tu, pre = conv
+            final = ([{"type": "text", "text": pre}] if pre else []) + tu
+    return final
 
 
 # ── LLM Client ────────────────────────────────────────────
@@ -378,9 +455,5 @@ class LLMClient:
                 elif etype == "message_stop":
                     self.usage["calls"] += 1
 
-        # 过滤掉 thinking blocks（只保留 text + tool_use 给 agent）
-        final_blocks = [
-            b for b in blocks
-            if b and b.get("type") in ("text", "tool_use")
-        ]
-        return _SimpleMsg(final_blocks)
+        # 过滤 thinking 块 + DSML 工具调用兜底(见 _finalize_blocks)
+        return _SimpleMsg(_finalize_blocks(blocks))
