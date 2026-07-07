@@ -54,7 +54,9 @@ def create_file_tools(base_dir: str | None = None) -> list[Tool]:
     def _write_file(path: str, content: str) -> str:
         full = _resolve(base, path)
         os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
-        with open(full, "w", encoding="utf-8") as f:
+        # newline="" 禁止 \n→\r\n 翻译（Windows 文本模式默认会改行尾，
+        # 造成 git 'LF will be replaced by CRLF' 警告、diff 噪声）
+        with open(full, "w", encoding="utf-8", newline="") as f:
             f.write(content)
         return f"Wrote {len(content)} chars to {full}"
 
@@ -79,7 +81,7 @@ def create_file_tools(base_dir: str | None = None) -> list[Tool]:
         else:
             new_content = content.replace(old_string, new_string, 1)
             n = 1
-        with open(full, "w", encoding="utf-8") as f:
+        with open(full, "w", encoding="utf-8", newline="") as f:
             f.write(new_content)
         return f"Replaced {n} occurrence(s) in {full}"
 

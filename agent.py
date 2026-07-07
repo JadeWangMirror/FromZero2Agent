@@ -268,7 +268,7 @@ class Agent:
                     callback("text_delta", {"text": ev.text})
 
             response = self.llm.send_stream(
-                messages=messages,
+                messages=self._sanitize_messages(messages),
                 tools=tool_params,
                 system=self._build_system_prompt(),
                 on_event=on_stream,
@@ -338,7 +338,7 @@ class Agent:
 
         # 达到最大轮次仍未结束：强制一次无工具收尾，让模型总结已完成的成果
         wrap = self.llm.send_stream(
-            messages=messages,
+            messages=self._sanitize_messages(messages),
             tools=None,
             system=self._build_system_prompt()
                 + "\n\nYou have reached the tool-call turn limit. Stop calling tools and "
@@ -363,10 +363,66 @@ class Agent:
         """将本轮完整消息链保存到历史，并裁剪超长历史。"""
         # messages 已包含历史前缀 + 本轮所有消息
         # 直接替换历史为完整消息链
-        self._history = list(messages)
-        # 裁剪：保留最近 N 条
+        self._history = self._sanitize_messages(list(messages))
+        # 裁剪：保留最近 N 条（在安全边界切，避免切断 tool_use/tool_result 对）
         if len(self._history) > self._max_history:
-            self._history = self._history[-self._max_history:]
+            self._history = self._safe_tail(self._history, self._max_history)
+
+    # ── 历史完整性 ───────────────────────────────────────
+
+    @staticmethod
+    def _is_text_user(m) -> bool:
+        """该消息是否为"干净的 user 文本回合"（可作为历史片段的安全起点）。"""
+        if not isinstance(m, dict) or m.get("role") != "user":
+            return False
+        c = m.get("content")
+        if isinstance(c, str):
+            return True
+        if isinstance(c, list):
+            return not any(isinstance(b, dict) and b.get("type") == "tool_result"
+                           for b in c)
+        return False
+
+    @classmethod
+    def _safe_tail(cls, msgs: list, n: int) -> list:
+        """取最后 n 条，但左边界右移到第一条干净的 user-text 消息，
+        防止从 tool_result 起头（会产生孤儿 tool_result → API 400）。"""
+        tail = list(msgs[-n:]) if n < len(msgs) else list(msgs)
+        while tail and not cls._is_text_user(tail[0]):
+            tail.pop(0)
+        return tail
+
+    @staticmethod
+    def _sanitize_messages(msgs: list) -> list:
+        """删除孤儿 tool_result：其 tool_use_id 在前一条 assistant 消息里不存在。
+
+        DeepSeek/Anthropic 严格要求每个 tool_result 有对应的 tool_use，否则 400：
+        'tool_result must have a corresponding tool_use block in the previous message'。
+        """
+        out: list = []
+        prev_ids: set = set()
+        for m in msgs:
+            role = m.get("role", "user") if isinstance(m, dict) else "user"
+            content = m.get("content") if isinstance(m, dict) else m
+            if role == "assistant":
+                if isinstance(content, list):
+                    prev_ids = {b.get("id") for b in content
+                                if isinstance(b, dict) and b.get("type") == "tool_use"}
+                out.append(m)
+                continue
+            # user：过滤掉 tool_use_id 不在前一条里的 tool_result
+            if isinstance(content, list):
+                kept = [b for b in content
+                        if not (isinstance(b, dict) and b.get("type") == "tool_result"
+                                and b.get("tool_use_id") not in prev_ids)]
+                if not kept:
+                    prev_ids = set()
+                    continue          # 整条都是孤儿 → 丢弃，避免空消息
+                out.append({"role": "user", "content": kept})
+            else:
+                out.append(m)
+            prev_ids = set()
+        return out
 
     # ── 上下文自动压缩 ─────────────────────────────────────
 
@@ -378,7 +434,8 @@ class Agent:
         if not force and total < self._compress_threshold:
             return
         old = self._history[:-self._keep_recent]
-        recent = self._history[-self._keep_recent:]
+        # recent 必须在安全边界起头，否则 summary(user) + orphan tool_result → 400
+        recent = self._safe_tail(self._history, self._keep_recent)
         try:
             summary = self._summarize(old)
         except Exception:
@@ -387,7 +444,7 @@ class Agent:
             "role": "user",
             "content": f"[Earlier conversation summary]\n{summary}",
         }
-        self._history = [summary_msg] + list(recent)
+        self._history = self._sanitize_messages([summary_msg] + list(recent))
 
     def _truncate_result(self, result: str) -> str:
         """工具结果过长则截断，避免单条结果撑爆上下文。"""
@@ -529,3 +586,52 @@ def create_agent(api_key: str | None = None, config=None, **kwargs) -> Agent:
     ))
 
     return agent
+
+
+# ── 救援 Agent（最终兜底）──────────────────────────────────
+
+RESCUE_PROMPT = """\
+You are MIRROR's RESCUE agent — a minimal, stable fallback engaged only when \
+the primary agent's communication failed mid-task.
+
+Constraints (do not evolve):
+1. You have ONLY basic file + code execution tools. No sub-agents, no \
+self-evolution, no meta-tools. Work within this set.
+2. Complete the user's task directly and reliably. Prefer simple, robust steps.
+3. If you cannot fully complete it, say precisely what you did and what remains.
+4. Always verify file/code changes with a tool before claiming success.
+"""
+
+
+def create_rescue_agent(api_key: str | None = None, config=None) -> Agent:
+    """最小、稳定的救援 agent：仅在主 agent 通信异常时由 TUI 激活。
+
+    设计目标"功能固定不变"：
+    - 只注册经过充分测试的基础工具（文件读写/搜索/代码执行）；
+    - 不加载自造工具、不注册元工具、不绑定子 agent；
+    - 独立空历史，不走上下文压缩（避免主 agent 的历史损坏风险）；
+    - 固定 system prompt，短轮次。
+    """
+    from filetools import create_file_tools
+    from tools import ToolRegistry
+
+    reg = ToolRegistry()
+    safe = {"read_file", "write_file", "edit_file", "list_dir",
+            "glob", "grep", "run_python", "run_shell"}
+    for t in create_file_tools():
+        if t.name in safe:
+            reg.register(t)
+
+    model = getattr(config, "model", "deepseek-v4-pro")
+    base_url = getattr(config, "base_url", "https://api.deepseek.com/anthropic")
+
+    return Agent(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        max_turns=6,
+        max_history=12,
+        system_prompt=RESCUE_PROMPT,
+        tools=reg,
+        toolforge=None,
+    )

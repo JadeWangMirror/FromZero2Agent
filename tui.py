@@ -930,10 +930,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         self._has_think = False
 
         # spinner
-        self._spin = Static("")
-        self._spin_idx = 0
-        self._mnt(self._spin)
-        self._spin_timer = self.set_interval(0.08, self._tick)
+        self._start_spinner()
 
         self._busy = True
         self._tool_blocks = []
@@ -944,6 +941,19 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
             f = SPINNER[self._spin_idx % len(SPINNER)]
             self._spin_idx += 1
             self._spin.update(f"[{COL_WORK}]{f} Thinking...[/]")
+        # spinner 周期内同步刷新状态条（用量/进度实时变化）
+        self._refresh_status()
+
+    def _start_spinner(self) -> None:
+        """挂载一个 Thinking spinner（主 agent / 救援 agent 共用）。"""
+        self._spin = Static("")
+        self._spin_idx = 0
+        self._mnt(self._spin)
+        self._spin_timer = self.set_interval(0.08, self._tick)
+
+    def _start_spinner_t(self) -> None:
+        """worker 线程安全版。"""
+        self.call_from_thread(self._start_spinner)
         # spinner 周期内同步刷新状态条（用量/进度实时变化）
         self._refresh_status()
 
@@ -995,8 +1005,24 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         try:
             ans = self._agent.run(task, callback=cb)
         except Exception as e:
+            # 主 agent 通信异常 → 启动救援 agent（最小、稳定、独立空历史）
             self.call_from_thread(self._done)
-            self._mnt_t(Static(f"[bold #F85149]x {e}[/]"))
+            self._mnt_t(Static(
+                f"[#D29922]⚠ primary agent failed:[/] [dim]{str(e).splitlines()[0][:200]}[/]"))
+            self._mnt_t(Static(f"[{COL_WORK}]⏳ rescue agent engaged…[/]"))
+            self._start_spinner_t()
+            try:
+                from agent import create_rescue_agent
+                rescue = create_rescue_agent(api_key=self._key, config=self._cfg)
+                ans = rescue.run(task, callback=cb)
+            except Exception as e2:
+                self.call_from_thread(self._done)
+                self._mnt_t(Static(f"[bold #F85149]x rescue also failed:[/] "
+                                   f"[dim]{str(e2).splitlines()[0][:200]}[/]"))
+                self._busy = False
+                return
+            self.call_from_thread(self._done)
+            self.call_from_thread(self._finish_stream, ans)
             self._busy = False
             return
 
