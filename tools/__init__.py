@@ -1,5 +1,9 @@
 """
 工具系统 — 工具定义、注册中心与执行器（Anthropic 协议格式）。
+
+这是一个包:核心抽象(Tool / ToolRegistry)在本 __init__,自造工具的源码
+存放在子目录 custom/<name>/tool.py(由 toolforge.ToolForge 按路径读取执行,
+不经 import)。统一为包后,`tools` 只指代这一处,不再与旧 tools.py 同名冲突。
 """
 
 from __future__ import annotations
