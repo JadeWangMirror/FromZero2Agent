@@ -55,7 +55,20 @@ STEP 1 — ASSESS (mandatory before building):
 STEP 2 — RESPECT THE VERDICT:
   • SKIP because an existing tool covers it → USE that tool. Do not rebuild.
   • SKIP because reuse_signal="once" → use run_python. One-offs must not become tools.
-  • BUILD → proceed to STEP 3.
+  • BUILD → proceed to STEP 2.5.
+
+STEP 2.5 — REUSE FIRST (mandatory before writing any tool code):
+  Do NOT reinvent the wheel. Before create_tool, ACTIVELY look for an existing solution:
+  (a) web_search "<capability> python library" (and "<capability> pypi"); skim top results.
+  (b) web_fetch the candidate's README/docs if unclear.
+  (c) If a mature, maintained package exists, PREFER WRAPPING IT — create_tool whose
+      execute() imports and calls that package — over reimplementing from scratch.
+      Battle-tested open-source beats hand-rolled code on correctness, edge cases, and
+      maintenance. Record the dependency in the tool description.
+  (d) Only write from scratch if no good existing solution exists (and say why you searched
+      and found nothing).
+  This step is non-negotiable: building a tool without first searching for an existing
+  solution is a process failure.
 
 STEP 3 — BUILD (only when verdict is BUILD):
   create_tool(name, description, parameters, code, test_code):

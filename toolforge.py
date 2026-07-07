@@ -495,6 +495,12 @@ class ToolForge:
                 "tip: description must state WHEN to use it; always include test_code; "
                 "compose via use('other_tool', **kwargs) instead of reimplementing."
             )
+            lines.append(
+                f"reuse_first (STEP 2.5, mandatory): BEFORE writing code, run "
+                f"web_search '{capability} python library' and skim the top results; "
+                f"PREFER WRAPPING a mature, maintained package (create_tool that imports "
+                f"and calls it) over reimplementing. Only hand-roll if nothing good exists."
+            )
         return "\n".join(lines)
 
     # ── 自进化:工具审查 + 改进 ─────────────────────────────
