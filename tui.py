@@ -18,6 +18,18 @@ from textual.widgets import Markdown, RichLog, Static, TextArea
 
 from rich.markup import escape as _esc
 
+# 控制字符剥离表:去掉所有 C0 控制字节(保留 \n \t \r)+ DEL。
+# 流式里若混入 \x1b(ESC) 等控制字节,markup 转义管不到,会直接污染终端、
+# 把屏幕搞成乱码(尤其崩溃后终端未还原时)。_esc 之前先过这道。
+_CTRL_TABLE = str.maketrans(
+    "", "", "".join(chr(c) for c in range(32) if chr(c) not in "\n\t\r") + "\x7f")
+
+
+def _clean(s: str) -> str:
+    """剥离控制字符(保留换行/制表/回车)。"""
+    return s.translate(_CTRL_TABLE) if s else s
+
+
 from agent import Agent, create_agent
 
 # ── Spinner ─────────────────────────────────────────────────
@@ -1045,7 +1057,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         # 显示上限放宽(原 2000 太小,长思考一过 2000 就截断 → 像卡住);RichLog 可滚动
         shown = content if len(content) <= 10000 else content[:10000] + "\n…(truncated)"
         self._think_text.clear()
-        self._think_text.write(f"[dim]{_esc(shown)}[/]")
+        self._think_text.write(f"[dim]{_esc(_clean(shown))}[/]")
         self._think_shown = len(content)
 
     def _done(self) -> None:
@@ -1072,7 +1084,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
     def _stream_update(self, text: str) -> None:
         """流式增量更新累积文本。"""
         if self._stream_text:
-            self._stream_text.update(f"[#E6EDF3]{_esc(text)}[/]")
+            self._stream_text.update(f"[#E6EDF3]{_esc(_clean(text))}[/]")
             self._conv.scroll_end(animate=False)
 
     def _finish_stream(self, full_text: str) -> None:
