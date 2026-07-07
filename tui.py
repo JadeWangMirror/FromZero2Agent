@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 
 from textual import work
@@ -28,6 +29,25 @@ _CTRL_TABLE = str.maketrans(
 def _clean(s: str) -> str:
     """剥离控制字符(保留换行/制表/回车)。"""
     return s.translate(_CTRL_TABLE) if s else s
+
+
+# DSML 流式实时剥离 —— 这才是"解决"而非"防御":
+# 端点偶发把工具调用以 ｜｜DSML｜｜ 文本漏到 text 流。_finalize_blocks 会在流结束后
+# 把它转成真正的 tool_use(工具照常触发),但【流式过程中】这些 DSML 文本会实时
+# 渲染到屏幕 → 用户看到乱码。这里在显示前就把它去掉,用户永远看不到 DSML。
+_DSML_TOKEN = re.compile(r"[|｜]{1,}\s*DSML", re.I)   # 流式增量:见 ｜｜DSML 即剥,不等闭合
+
+
+def _strip_dsml_for_display(text: str) -> str:
+    """流式显示用:一旦出现 DSML 标记,只保留其前的干净文本 + 占位提示。"""
+    text = text or ""
+    m = _DSML_TOKEN.search(text)
+    if not m:
+        return text
+    start = text.rfind("<", 0, m.start())      # 回溯到标签起点 '<'
+    cut = start if start != -1 else m.start()
+    pre = text[:cut].rstrip()
+    return (pre + "\n  ⚙ invoking tool…") if pre else "  ⚙ invoking tool…"
 
 
 from agent import Agent, create_agent
@@ -1057,7 +1077,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         # 显示上限放宽(原 2000 太小,长思考一过 2000 就截断 → 像卡住);RichLog 可滚动
         shown = content if len(content) <= 10000 else content[:10000] + "\n…(truncated)"
         self._think_text.clear()
-        self._think_text.write(f"[dim]{_esc(_clean(shown))}[/]")
+        self._think_text.write(f"[dim]{_esc(_clean(_strip_dsml_for_display(shown)))}[/]")
         self._think_shown = len(content)
 
     def _done(self) -> None:
@@ -1084,7 +1104,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
     def _stream_update(self, text: str) -> None:
         """流式增量更新累积文本。"""
         if self._stream_text:
-            self._stream_text.update(f"[#E6EDF3]{_esc(_clean(text))}[/]")
+            self._stream_text.update(f"[#E6EDF3]{_esc(_clean(_strip_dsml_for_display(text)))}[/]")
             self._conv.scroll_end(animate=False)
 
     def _finish_stream(self, full_text: str) -> None:
