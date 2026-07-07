@@ -16,6 +16,8 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Markdown, RichLog, Static, TextArea
 
+from rich.markup import escape as _esc
+
 from agent import Agent, create_agent
 
 # ── Spinner ─────────────────────────────────────────────────
@@ -177,13 +179,13 @@ class ToolCallBlock(Widget):
         marker = "▸" if self.collapsed else "▾"
         prefix = f"[{self.role}] " if self.role else ""
         return (f"[#6E7681]{marker}[/] [bold #D2A8FF]{prefix}{self.tool_name}[/]"
-                f"  [dim]{self._args_str()}[/]{self._status()}")
+                f"  [dim]{_esc(self._args_str())}[/]{self._status()}")
 
     def _body_markup(self) -> str:
         lines = ["[bold #C9D1D9]arguments[/]"]
         if self.tool_args:
             for k, v in self.tool_args.items():
-                lines.append(f"  [dim]{k}:[/] {self._trunc(repr(v), 500)}")
+                lines.append(f"  [dim]{k}:[/] {_esc(self._trunc(repr(v), 500))}")
         else:
             lines.append("  [dim](none)[/]")
         if self.done:
@@ -191,7 +193,7 @@ class ToolCallBlock(Widget):
             res = self.result or "(no output)"
             lines.append(f"[bold #C9D1D9]result[/]  "
                          f"[dim]({self._fmt_chars(len(res))})[/]")
-            lines.append(self._trunc(res, 4000))
+            lines.append(_esc(self._trunc(res, 4000)))
         else:
             lines += ["", "[dim]… running[/]"]
         return "\n".join(lines)
@@ -668,9 +670,9 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
         for i in range(start, end):
             cmd, desc = self._pal_matches[i]
             if i == self._pal_idx:
-                lines.append(f"[bold #4493F8 on #30363D] ▸ {cmd:<10} {desc} [/]")
+                lines.append(f"[bold #4493F8 on #30363D] ▸ {_esc(cmd):<10} {_esc(desc)} [/]")
             else:
-                lines.append(f"[dim]   {cmd:<10} {desc}[/]")
+                lines.append(f"[dim]   {_esc(cmd):<10} {_esc(desc)}[/]")
         if end < n:
             lines.append(f"[dim]    ▼  {n - end} more ↓[/]")
         self._palette.update("\n".join(lines))
@@ -915,7 +917,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
             return
 
         # 用户消息
-        self._mnt(Static(f"[bold {COL_USER}]| YOU[/]  {text}"))
+        self._mnt(Static(f"[bold {COL_USER}]| YOU[/]  {_esc(text)}"))
 
         # 思考区 — RichLog 增量追加，无额外间距
         self._think_box = VerticalScroll(classes="think-box")
@@ -1008,7 +1010,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
             # 主 agent 通信异常 → 启动救援 agent（最小、稳定、独立空历史）
             self.call_from_thread(self._done)
             self._mnt_t(Static(
-                f"[#D29922]⚠ primary agent failed:[/] [dim]{str(e).splitlines()[0][:200]}[/]"))
+                f"[#D29922]⚠ primary agent failed:[/] [dim]{_esc(str(e).splitlines()[0][:200])}[/]"))
             self._mnt_t(Static(f"[{COL_WORK}]⏳ rescue agent engaged…[/]"))
             self._start_spinner_t()
             try:
@@ -1018,7 +1020,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
             except Exception as e2:
                 self.call_from_thread(self._done)
                 self._mnt_t(Static(f"[bold #F85149]x rescue also failed:[/] "
-                                   f"[dim]{str(e2).splitlines()[0][:200]}[/]"))
+                                   f"[dim]{_esc(str(e2).splitlines()[0][:200])}[/]"))
                 self._busy = False
                 return
             self.call_from_thread(self._done)
@@ -1038,7 +1040,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
                 content = content[:2000] + "\n..."
             # RichLog 增量写入 — 清空后重写完整内容
             self._think_text.clear()
-            self._think_text.write(f"[dim]{content}[/]")
+            self._think_text.write(f"[dim]{_esc(content)}[/]")
 
     def _done(self) -> None:
         if hasattr(self, "_spin_timer") and self._spin_timer:
@@ -1064,7 +1066,7 @@ tool system + self-evolution via ToolForge). Python + [Textual](https://textual.
     def _stream_update(self, text: str) -> None:
         """流式增量更新累积文本。"""
         if self._stream_text:
-            self._stream_text.update(f"[#E6EDF3]{text}[/]")
+            self._stream_text.update(f"[#E6EDF3]{_esc(text)}[/]")
             self._conv.scroll_end(animate=False)
 
     def _finish_stream(self, full_text: str) -> None:
