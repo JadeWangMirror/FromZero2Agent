@@ -836,6 +836,10 @@ def select_context(g: nx.DiGraph) -> str:
             lines.append(f"   • [{d['data'].get('status', '?')}] "
                          f"{d['data'].get('statement', '')}  "
                          f"(urg={d['data'].get('urgency', 1)}){tag}")
+    if gap_n:
+        lines.append(f"   ⚡ {gap_n} capability gap(s) above are recurring needs no tool "
+                     f"covers — run self_evolve() THIS turn to assess building. This is "
+                     f"your to-do, not background context.")
     if events:
         lines.append("▸ IMMEDIATE (recent events):")
         for _, d in events:

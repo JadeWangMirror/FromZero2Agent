@@ -33,6 +33,18 @@ TOOL SELECTION
 ═══════════════════════════════════════════════════════════
 SELF-EVOLUTION — you decide what to build, and you build it
 ═══════════════════════════════════════════════════════════
+PROACTIVITY — you are not passive. This is what makes you MIRROR, not a chatbot:
+- A ⚡ capability gap in MEMORY is YOUR to-do, not background info. The turn it
+  appears, call self_evolve() (no args) to assess it; if VERDICT is BUILD, build
+  the tool that same turn. Deferring a real recurring gap is a failure mode — it
+  means you keep hand-rolling the same workaround forever.
+- Memory folds ITSELF when your struggle accumulates (you don't have to call
+  consolidate_memory unless asked). When a gap self-emerges from that, ACT on it.
+- Record durable facts the instant you confirm them: corrections, preferences,
+  environment/project conventions. Call remember() right then — never defer or
+  batch memory writes; late or missing memory is as bad as no memory.
+Silence in the face of a surfaced gap is the one thing you must not do.
+
 Self-evolve AUTONOMOUSLY — do not wait for the user to describe a tool. Two
 self-detected signals trigger you, and you run the full assess→build→verify loop
 on your own authority:
@@ -98,7 +110,8 @@ MEMORY — emergent, NOT retrieved
 Your memory is a concept graph (hippocampal events -> neocortical concepts ->
 prefrontal intents), read by graph topology each turn. You do NOT query it.
 - remember(content, tags): commit ONE event — corrections, durable facts,
-  preferences, environment notes, project conventions. This is raw material.
+  preferences, environment notes, project conventions. Record it the INSTANT you
+  confirm it; never defer or batch. This is raw material.
 - consolidate_memory(): FOLD the graph. Clusters of recurring events abstract
   into concepts; strongly-supported concepts CRYSTALLIZE into intents that
   surface on their own. Run it after adding several events, or when the MEMORY
@@ -200,10 +213,11 @@ class Agent:
         try:
             from memory import pending_signals
             n = pending_signals()
-            if n >= 3:
-                base += (f"\n\n⚠ {n} unreflected struggle signals (failures/workarounds) "
-                         f"are queued in memory. Run consolidate_memory to reflect on them "
-                         f"and surface the capability boundaries they imply.")
+            if n >= 2:
+                base += (f"\n\n⚠ {n} struggle signals (failures / manual workarounds) "
+                         f"queued. Memory auto-folds these into capability gaps; the turn "
+                         f"a ⚡ gap surfaces above, run self_evolve() to assess building a "
+                         f"tool for it — do not defer.")
         except Exception:
             pass
         if not self.tools:
@@ -315,6 +329,9 @@ class Agent:
         self._current_callback = callback
         # 上下文过大则先压缩历史
         self._maybe_compress()
+        # 主动性:有挣扎信号/事件堆积 → 自动折叠记忆,能力缺口在本回合即时浮现
+        # (consolidate+reflect 是产出结构的核心对;reflect<2 信号时早退,成本可控)
+        self._maybe_auto_consolidate()
         # 从历史 + 当前用户消息开始
         messages: list[MessageParam] = list(self._history)
         messages.append({"role": "user", "content": task})
@@ -657,7 +674,7 @@ class Agent:
                 code = (inp or {}).get("code", "") if isinstance(inp, dict) else ""
                 if isinstance(code, str):
                     nonblank = [l for l in code.splitlines() if l.strip()]
-                    if len(nonblank) >= 6:  # 多行手搓 → 绕路候选
+                    if len(nonblank) >= 4:  # 多行手搓 → 绕路候选
                         record_signal("workaround",
                                       f"manual python ({len(nonblank)} lines): "
                                       f"{nonblank[0][:70]}",
@@ -679,6 +696,37 @@ class Agent:
         report += "\n" + reflect(self._llm_summarize)
         report += "\n" + resolve_supersede(self._llm_summarize)
         return report + "\n" + context_block()
+
+    def _maybe_auto_consolidate(self) -> None:
+        """主动性闸门:挣扎信号攒够(≥2)或事件堆积(≥8)时自动折叠记忆。
+
+        这是"记忆真正被利用"的关键 —— 否则 consolidate_memory 永远要 agent 手动调,
+        图不折叠 → concept/intent/gap 永不涌现 → "记忆当需求传感器"整套设计空转。
+        自动折叠后,本回合的 system prompt(下方 _build_system_prompt)立刻读到
+        新涌现的 ⚡ capability gap,agent 该不该造工具一目了然。
+
+        成本可控:reflect 在 <2 信号时早退、resolve_supersede 在 <2 concept 时早退,
+        consolidate 无簇也不调 LLM;只在真实信号/堆积时才花 1-2 次 batch LLM。
+        每次折叠都会消耗信号(reflect 标 reflected、consolidate 标 consolidated),
+        故天然自限,不会每轮重复触发。
+        """
+        try:
+            import re as _re
+            from memory import pending_signals, graph_stats, consolidate, reflect
+            signals = pending_signals()
+            unconsolidated = 0
+            m = _re.search(r"unconsolidated_events=(\d+)", graph_stats())
+            if m:
+                unconsolidated = int(m.group(1))
+            if signals < 2 and unconsolidated < 8:
+                return  # 无信号又无堆积 → 不花 LLM
+            tools = ([(n, t.description) for n, t in self.tools._tools.items()]
+                     if self.tools else [])
+            consolidate(self._llm_summarize, tools=tools)
+            if signals >= 2:
+                reflect(self._llm_summarize)
+        except Exception:
+            pass  # 折叠失败不影响主流程
 
 
 # ── 便捷函数 ───────────────────────────────────────────────
