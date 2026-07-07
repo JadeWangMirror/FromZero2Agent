@@ -593,6 +593,31 @@ def satisfy_gap(tool_name: str, desc: str = "") -> int:
     return closed
 
 
+def revoke_tool(name: str) -> str:
+    """satisfy_gap 的逆操作: 工具被删除 → 从记忆图移除其 acquired-tool 事件,
+    并重开它满足过的 capability_gap(否则图会谎称一个已不存在的工具仍覆盖某缺口)。"""
+    g = _graph()
+    removed = 0
+    markers = (f"acquired tool '{name}'", f'acquired tool "{name}"')
+    for n in list(g.nodes):
+        d = g.nodes[n]
+        if d.get("type") == "event":
+            content = d.get("data", {}).get("content", "")
+            if any(m in content for m in markers):
+                g.remove_node(n)
+                removed += 1
+    reopened = 0
+    for _, d in g.nodes(data=True):
+        if d.get("type") == "intent" and d["data"].get("covered_by") == name:
+            d["data"]["covered_by"] = None
+            d["data"]["status"] = "pending"
+            d["data"]["kind"] = "capability_gap"
+            reopened += 1
+    if removed or reopened:
+        _save_graph(g)
+    return f"revoked {name}: removed {removed} event(s), reopened {reopened} gap(s)."
+
+
 def reflect(summarize_fn) -> str:
     """反思 pass: 从失败/绕路/高耗信号里识别真正的"能力边界"。
 

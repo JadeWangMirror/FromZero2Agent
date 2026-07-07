@@ -216,6 +216,13 @@ def test_memory_selfevolve():
 
 
 def main():
+    # 隔离全局记忆:create_tool / update_intent 等会写记忆,测试用临时图,
+    # 绝不污染用户真实的 ~/.mirror/graph.json
+    tmp_m = tempfile.mkdtemp()
+    memory._G = None
+    memory.MEMORY_DIR = tmp_m
+    memory.GRAPH_FILE = os.path.join(tmp_m, "graph.json")
+    memory.LEGACY_FILE = os.path.join(tmp_m, "memory.json")
     test_builtin()
     test_file_tools()
     test_web_tools()

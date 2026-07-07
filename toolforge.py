@@ -259,6 +259,13 @@ class ToolForge:
         shutil.rmtree(self._tool_dir(name))
         if name in self.registry._tools:
             del self.registry._tools[name]
+        # 清记忆: 移除该工具的 acquired-tool 事件 + 重开它满足过的 gap
+        # (否则记忆会谎称一个已删除的工具仍覆盖某缺口)
+        try:
+            import memory as _mem
+            self._log(_mem.revoke_tool(name))
+        except Exception:
+            pass
         self._log(f"delete_tool {name}")
         return f"Tool '{name}' deleted."
 
