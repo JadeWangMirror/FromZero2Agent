@@ -218,6 +218,43 @@ class LLMClient:
         assert last_exc is not None
         raise last_exc
 
+    def _http_error(self, resp, body: dict) -> httpx.HTTPStatusError:
+        """构造带响应体 + 针对性诊断的 HTTP 错误，避免只看到干巴巴的 400。"""
+        try:
+            raw = resp.read().decode("utf-8", errors="replace")
+        except Exception:
+            raw = ""
+        hint = raw.strip()
+        try:
+            j = json.loads(raw)
+            if isinstance(j, dict):
+                err = j.get("error")
+                if isinstance(err, dict):
+                    hint = (err.get("message") or err.get("type") or raw).strip()
+                elif isinstance(j.get("message"), str):
+                    hint = j["message"].strip()
+        except Exception:
+            pass
+        diag = self._diagnose_400(body) if resp.status_code == 400 else ""
+        msg = (f"HTTP {resp.status_code} {resp.reason_phrase} "
+               f"from {self.base_url}\n  → {hint[:400]}{diag}")
+        return httpx.HTTPStatusError(msg, request=resp.request, response=resp)
+
+    def _diagnose_400(self, body: dict) -> str:
+        """针对 DeepSeek anthropic 端点的 400 常见原因给出修复提示。"""
+        if "deepseek" not in self.base_url.lower():
+            return ""          # 非 DeepSeek 端点不做揣测
+        hints = ""
+        if body.get("thinking"):
+            hints += ("\n  · 请求带了 `thinking`(扩展思考) 字段，DeepSeek 端点可能不支持 —— "
+                      "运行 /effort off 后重试")
+        model = body.get("model", "")
+        valid = ("deepseek-v4-pro", "deepseek-v4-flash")
+        if model and model not in valid:
+            hints += (f"\n  · 模型名 `{model}` 该端点不认；只支持 "
+                      f"deepseek-v4-pro / deepseek-v4-flash —— 运行 /model deepseek-v4-pro")
+        return hints
+
     def _stream_once(self, body, headers, on_event) -> _SimpleMsg:
         """单次流式请求 + SSE 解析。"""
         blocks: list[dict] = []
@@ -232,7 +269,8 @@ class LLMClient:
             json=body,
             timeout=120,
         ) as resp:
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                raise self._http_error(resp, body)
             for line in resp.iter_lines():
                 if not line or not line.startswith("data: "):
                     continue
