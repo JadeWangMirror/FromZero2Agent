@@ -127,14 +127,35 @@ def _recency_iso(ts: str, half_life_h: float = DECAY_HALF_LIFE_H) -> float:
 
 # ── 图持久化(JSON: nodes + edges) ──────────────────────
 
+def _try_load_json(path: str):
+    """读取并解析 JSON;失败返回 None。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def _load_graph() -> nx.DiGraph:
     g = nx.DiGraph()
     if not os.path.exists(GRAPH_FILE):
         return g
-    try:
-        with open(GRAPH_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
+    data = _try_load_json(GRAPH_FILE)
+    if data is None:
+        # 主文件损坏 — 绝不静默吞错返回空图。
+        # 否则空图会被单例缓存,下一次 _save_graph 就把它覆盖回磁盘,
+        # 永久清空记忆(整个图谱曾因此丢失)。这里改为:留证 + 从 rotate 备份恢复。
+        try:
+            ts = _now().replace(":", "").replace("-", "")
+            os.replace(GRAPH_FILE, GRAPH_FILE + f".corrupt_{ts}")
+        except OSError:
+            pass
+        for cand in (GRAPH_FILE + ".bak", GRAPH_FILE + ".bak2"):
+            if os.path.exists(cand):
+                data = _try_load_json(cand)
+                if data is not None:
+                    break
+    if data is None:
         return g
     for n in data.get("nodes", []):
         g.add_node(n["id"], **{k: v for k, v in n.items() if k != "id"})
@@ -154,8 +175,24 @@ def _save_graph(g: nx.DiGraph) -> None:
             for u, v, d in g.edges(data=True)
         ],
     }
-    with open(GRAPH_FILE, "w", encoding="utf-8", newline="") as f:
+    # 原子写:先全量写临时文件,再 os.replace 原子上线。
+    # 直接 open("w") 会先截断文件,若写入中途崩溃就留下半截损坏 JSON;
+    # 叠加旧的 _load_graph 静默吞错,曾导致整张图被空图覆盖丢失。
+    tmp = GRAPH_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    # rotate 备份:bak → bak2, 当前正式文件 → bak, tmp → 正式。
+    # 保留最近两份历史,损坏时可从 bak 链恢复。
+    try:
+        bak = GRAPH_FILE + ".bak"
+        bak2 = GRAPH_FILE + ".bak2"
+        if os.path.exists(bak):
+            os.replace(bak, bak2)
+        if os.path.exists(GRAPH_FILE):
+            os.replace(GRAPH_FILE, bak)
+    except OSError:
+        pass
+    os.replace(tmp, GRAPH_FILE)
 
 
 def _next_id(g: nx.DiGraph, prefix: str) -> str:
