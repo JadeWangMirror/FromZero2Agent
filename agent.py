@@ -69,6 +69,25 @@ WHEN UNSURE whether building is worth it, delegate to spawn_agent("tool_designer
 — it runs the full assess→build→verify flow in isolation and reports.
 
 ═══════════════════════════════════════════════════════════
+MEMORY — emergent, NOT retrieved
+═══════════════════════════════════════════════════════════
+Your memory is a concept graph (hippocampal events -> neocortical concepts ->
+prefrontal intents), read by graph topology each turn. You do NOT query it.
+- remember(content, tags): commit ONE event — corrections, durable facts,
+  preferences, environment notes, project conventions. This is raw material.
+- consolidate_memory(): FOLD the graph. Clusters of recurring events abstract
+  into concepts; strongly-supported concepts CRYSTALLIZE into intents that
+  surface on their own. Run it after adding several events, or when the MEMORY
+  block shows unconsolidated events piling up. Understanding emerges here —
+  without it, events stay raw forever.
+- The MEMORY block you see each turn is the graph's emergent state (PageRank +
+  recency), NOT a search result. Intents listed there were never asked for;
+  they crystallized because the topology accumulated the conditions for them.
+  Honor surfaced intents: act on pending ones, then update_intent(id, status).
+- update_intent(intent_id, status): mark an intent in_progress/done/skipped.
+Do not try to read/search memory — it is already in front of you each turn.
+
+═══════════════════════════════════════════════════════════
 DELEGATION — spawn_agent(role, task) for complex, self-contained work
 ═══════════════════════════════════════════════════════════
 - researcher: look up multiple things online (independent context).
@@ -134,10 +153,10 @@ class Agent:
     def _build_system_prompt(self) -> str:
         """构建 system prompt：基础指导（或用户自定义）+ 持久记忆 + 动态工具清单。"""
         base = self.system_prompt if self.system_prompt else SYSTEM_PROMPT
-        # 自动注入持久化记忆（读取即进入上下文，无需工具调用）
+        # 自动注入涌现式记忆（读图当前状态，无 query —— 见 memory.select_context）
         try:
-            from memory import format_for_prompt
-            mem = format_for_prompt()
+            from memory import context_block
+            mem = context_block()
             if mem:
                 base = base + "\n" + mem
         except Exception:
@@ -511,6 +530,30 @@ class Agent:
             if getattr(b, "type", "") == "text"
         )
 
+    # ── 涌现式记忆:折叠 ───────────────────────────────────
+
+    def _llm_summarize(self, user_prompt: str,
+                       system: str = "You abstract concise concepts. No preamble.") -> str:
+        """非流式 LLM 调用，返回纯文本（供记忆折叠复用）。失败返回空串。"""
+        try:
+            resp = self.llm.send(
+                [{"role": "user", "content": user_prompt}], system=system,
+            )
+            return "".join(getattr(b, "text", "") for b in resp.content
+                           if getattr(b, "type", "") == "text")
+        except Exception:
+            return ""
+
+    def consolidate_memory(self) -> str:
+        """触发记忆折叠循环：event → concept → intent（涌现）。
+
+        没有 query；concept/intent 从图拓扑里算出来。供 consolidate_memory 工具调用，
+        也可由 /consolidate 命令直接触发。返回报告 + 折叠后的涌现快照。
+        """
+        from memory import consolidate, context_block
+        report = consolidate(self._llm_summarize)
+        return report + "\n" + context_block()
+
 
 # ── 便捷函数 ───────────────────────────────────────────────
 
@@ -530,26 +573,41 @@ def create_agent(api_key: str | None = None, config=None, **kwargs) -> Agent:
     for tool in create_web_tools():
         registry.register(tool)
 
-    # 内置持久记忆：写入用工具，读取自动注入 system prompt（见 _build_system_prompt）
-    from memory import remember as mem_remember, forget as mem_forget
+    # 内置涌现式记忆（CogniFold 式概念图）：写入 event + 维护 intent；
+    # 读取自动注入 system prompt（见 _build_system_prompt → context_block）。
+    # 刻意不提供 recall/read —— 记忆是图拓扑涌现的，不是检索来的。
+    from memory import (remember as mem_remember, forget as mem_forget,
+                        update_intent as mem_update_intent)
     from tools import Tool as _Tool
     registry.register(_Tool(
         "remember",
-        "Persist a durable memory — a user preference, standing rule, or important "
-        "context that should outlive this session. Call when the user asks to "
-        "remember something, or when you discover a rule worth keeping. Saved memories "
-        "are auto-loaded into context on future turns; there is no read tool.",
-        {"content": {"type": "string", "description": "the fact / rule / preference to remember"},
+        "Commit ONE event to the memory graph (hippocampal layer). Use for "
+        "corrections, durable facts, user preferences, environment/project notes. "
+        "Raw material — understanding emerges later via consolidate_memory. "
+        "What surfaces in context each turn is the graph's emergent state, so "
+        "there is intentionally no read/search tool.",
+        {"content": {"type": "string", "description": "the fact / rule / preference / observation"},
          "tags": {"type": "string", "description": "comma-separated tags (optional)", "default": ""}},
         mem_remember,
         required=["content"],
     ))
     registry.register(_Tool(
         "forget",
-        "Delete a persisted memory by its id (shown in the PERSISTENT MEMORY block).",
-        {"memory_id": {"type": "string", "description": "the id of the memory to remove"}},
+        "Remove a node from the memory graph by its id (event/concept/intent, "
+        "as shown in the MEMORY block).",
+        {"node_id": {"type": "string", "description": "the graph node id to remove (e-/c-/i-)"}},
         mem_forget,
-        required=["memory_id"],
+        required=["node_id"],
+    ))
+    registry.register(_Tool(
+        "update_intent",
+        "Update an intent's status (pending|in_progress|done|skipped) and urgency. "
+        "Call when you act on an intent surfaced in the MEMORY block.",
+        {"intent_id": {"type": "string", "description": "the intent node id (i-...)"},
+         "status": {"type": "string", "description": "pending|in_progress|done|skipped", "default": "pending"},
+         "urgency": {"type": "integer", "description": "1-5 (optional)"}},
+        mem_update_intent,
+        required=["intent_id"],
     ))
 
     # 自我完善系统:加载已有自造工具 + 注册元工具
@@ -585,6 +643,17 @@ def create_agent(api_key: str | None = None, config=None, **kwargs) -> Agent:
          "max_turns": {"type": "integer", "description": "default 8"}},
         agent.spawn_as_tool,
         required=["role", "task"],
+    ))
+
+    # consolidate_memory 需要绑 agent 实例（折叠要复用其 LLM）
+    registry.register(Tool(
+        "consolidate_memory",
+        "Fold the memory graph: cluster recurring events into concepts, crystallize "
+        "strongly-supported concepts into intents that surface on their own. Run after "
+        "adding several events, or when the MEMORY block shows unconsolidated events "
+        "piling up. No arguments.",
+        {},
+        agent.consolidate_memory,
     ))
 
     return agent
