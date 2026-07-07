@@ -325,17 +325,32 @@ class Agent:
           "tool_result"  → {"name": str, "result": str}
           "text"         → {"text": str}      # 最终回复完整文本
           "sub:*"        → 子 agent 事件,{"role":..., ...}
+
+        异常安全:无论正常结束还是中途抛错(API 400 / 超时 / 工具异常…),
+        都把已积累的对话落盘 —— 不正常结束的对话也能恢复,下一轮不会失忆,
+        也不会因「孤儿 tool_use」触发 400。
         """
         self._current_callback = callback
-        # 上下文过大则先压缩历史
         self._maybe_compress()
-        # 主动性:有挣扎信号/事件堆积 → 自动折叠记忆,能力缺口在本回合即时浮现
-        # (consolidate+reflect 是产出结构的核心对;reflect<2 信号时早退,成本可控)
         self._maybe_auto_consolidate()
-        # 从历史 + 当前用户消息开始
         messages: list[MessageParam] = list(self._history)
         messages.append({"role": "user", "content": task})
+        try:
+            return self._run_loop(messages, callback)
+        finally:
+            # 兜底落盘:即便 _run_loop 抛错,也把已积累的 messages 持久化。
+            # _finalize_interrupted 先把半截对话补成合法形态(孤儿 tool_use 补结果、
+            # 末尾补 assistant 保轮替),否则下次请求会因 tool_use 无对应 result /
+            # 角色不轮替而 400 —— 这正是「断开后下一轮失忆 + 反复 tool_use 400」的根因。
+            try:
+                self._finalize_interrupted(messages)
+                self._save_history(messages)
+            except Exception:
+                pass
 
+    def _run_loop(self, messages: list[MessageParam],
+                  callback: StepCallback | None) -> str:
+        """ReAct 主循环 + max_turns 收尾。历史持久化统一由 run() 的 finally 兜底。"""
         for _turn in range(self.max_turns):
             if callback:
                 callback("turn", {"turn": _turn + 1, "max": self.max_turns})
@@ -388,13 +403,11 @@ class Agent:
 
             messages.append({"role": "assistant", "content": assistant_content})
 
-            # 无工具调用 → 最终回复，保存历史
+            # 无工具调用 → 最终回复（历史由 run() 的 finally 落盘）
             if not tool_uses:
                 final_text = "\n".join(text_parts)
                 if callback:
                     callback("text", {"text": final_text})
-                # 保存本轮到历史
-                self._save_history(messages)
                 return final_text
 
             # 执行工具
@@ -440,8 +453,8 @@ class Agent:
         )
         if callback:
             callback("text", {"text": final_text})
-        self._save_history(messages + [{"role": "assistant", "content": [
-            {"type": "text", "text": final_text}]}])
+        messages.append({"role": "assistant", "content": [
+            {"type": "text", "text": final_text}]})
         return final_text or "Agent reached maximum turns; see tool output above."
 
     def _save_history(self, messages: list[MessageParam]) -> None:
@@ -452,6 +465,41 @@ class Agent:
         # 裁剪：保留最近 N 条（在安全边界切，避免切断 tool_use/tool_result 对）
         if len(self._history) > self._max_history:
             self._history = self._safe_tail(self._history, self._max_history)
+
+    @staticmethod
+    def _finalize_interrupted(messages: list[MessageParam]) -> None:
+        """把异常中断的半截对话补成 API 合法形态,保证落盘后下次请求不 400。
+
+        两种需要修补的结尾:
+          (1) 末尾是 assistant 且含 tool_use,但没有跟随的 tool_result
+              → 补占位 tool_result(否则 DeepSeek 报「tool_use must be followed
+                by tool_result」→ 400 断开)。
+          (2) 末尾是 user(无回复的文本 / 刚补的 tool_result)
+              → 补一条 assistant 占位,维持 user/assistant 轮替。
+        末尾已是干净的 assistant 纯文本则不动。"""
+        if not messages:
+            return
+        last = messages[-1]
+        if not isinstance(last, dict):
+            return
+        if last.get("role") == "assistant":
+            content = last.get("content")
+            tids = ([b.get("id", "") for b in content
+                     if isinstance(b, dict) and b.get("type") == "tool_use"]
+                    if isinstance(content, list) else [])
+            if not tids:
+                return  # 纯文本 assistant,已是合法结尾
+            messages.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid,
+                 "content": "(turn interrupted by an error — no result captured)"}
+                for tid in tids
+            ]})
+        # 末尾为 user(文本或刚补的 tool_result)→ 补 assistant 占位保轮替
+        messages.append({"role": "assistant", "content": [
+            {"type": "text",
+             "text": "[this turn ended abnormally due to an error — context was "
+                     "preserved so the conversation can continue from here.]"}
+        ]})
 
     # ── 历史完整性 ───────────────────────────────────────
 
