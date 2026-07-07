@@ -160,7 +160,7 @@ class Agent:
         base_url: str = "https://api.deepseek.com/anthropic",
         model: str = "deepseek-v4-pro",
         max_tokens: int = 4096,
-        max_turns: int = 30,
+        max_turns: int = 50,
         tools: ToolRegistry | None = None,
         max_history: int = 500,
         temperature: float = 1.0,
@@ -353,9 +353,14 @@ class Agent:
             except Exception:
                 pass
 
+    _STALL_LIMIT = 4   # 连续 N 轮工具全失败 → 判定卡死,提前停(而非数到 max_turns)
+
     def _run_loop(self, messages: list[MessageParam],
                   callback: StepCallback | None) -> str:
-        """ReAct 主循环 + max_turns 收尾。历史持久化统一由 run() 的 finally 兜底。"""
+        """ReAct 循环:自然完成即返回;连续卡死(工具全失败)提前停;max_turns 仅极端兜底。
+        历史持久化统一由 run() 的 finally 兜底。"""
+        stall = 0                 # 连续"全失败"轮数
+        stopped_for = ""          # "stalled" | ""(到 backstop)
         for _turn in range(self.max_turns):
             if callback:
                 callback("turn", {"turn": _turn + 1, "max": self.max_turns})
@@ -415,8 +420,9 @@ class Agent:
                     callback("text", {"text": final_text})
                 return final_text
 
-            # 执行工具
+            # 执行工具,同时判断本轮是否"全失败"(卡死检测)
             tool_results: list[dict] = []
+            all_failed = bool(tool_uses)
             for tu in tool_uses:
                 if callback:
                     callback("tool_call", {"name": tu["name"], "args": tu["input"]})
@@ -436,17 +442,34 @@ class Agent:
                     "tool_use_id": tu["id"],
                     "content": self._truncate_result(result),
                 })
+                if not str(result).lstrip().lower().startswith(
+                        ("error", "tool execution error", "traceback")):
+                    all_failed = False
 
             messages.append({"role": "user", "content": tool_results})
+            # 卡死检测:连续 N 轮全失败 → 提前停(比数到 max_turns 合理得多)
+            if all_failed:
+                stall += 1
+                if stall >= self._STALL_LIMIT:
+                    stopped_for = "stalled"
+                    break
+            else:
+                stall = 0
 
-        # 达到最大轮次仍未结束：强制一次无工具收尾，让模型总结已完成的成果
+        # 收尾(卡死或到 backstop):强制一次无工具总结,原因写进提示
+        if stopped_for == "stalled":
+            reason = ("You appear stuck — your last several tool calls all failed. "
+                      "Stop calling tools; tell the user what went wrong and suggest a fix.")
+            fallback = "Agent stopped: repeated tool failures (stuck). See tool output above."
+        else:
+            reason = ("You have reached the tool-call turn backstop. Stop calling tools and "
+                      "give the user a concise final answer: summarize what you accomplished "
+                      "and, if incomplete, state precisely what remains.")
+            fallback = "Agent reached the turn backstop; see tool output above."
         wrap = self.llm.send_stream(
             messages=self._sanitize_messages(messages),
             tools=None,
-            system=self._build_system_prompt()
-                + "\n\nYou have reached the tool-call turn limit. Stop calling tools and "
-                  "now give the user a concise final answer: summarize what you accomplished "
-                  "and, if incomplete, state precisely what remains.",
+            system=self._build_system_prompt() + "\n\n" + reason,
             on_event=lambda ev: (
                 callback("text_delta", {"text": ev.text})
                 if callback and ev.type == "text_delta" else None
@@ -460,7 +483,7 @@ class Agent:
             callback("text", {"text": final_text})
         messages.append({"role": "assistant", "content": [
             {"type": "text", "text": final_text}]})
-        return final_text or "Agent reached maximum turns; see tool output above."
+        return final_text or fallback
 
     def _save_history(self, messages: list[MessageParam]) -> None:
         """将本轮完整消息链保存到历史，并裁剪超长历史。"""

@@ -196,9 +196,10 @@ class LLMClient:
     """Anthropic 协议 LLM 客户端，用 httpx 处理 SSE 流。"""
 
     # 各模型上下文窗口（tokens）；未命中则取默认值
+    # deepseek-v4-pro/flash 实际为 1M 窗口(此前误配 128k,白白浪费 87% 容量)
     CONTEXT_WINDOWS: dict[str, int] = {
-        "deepseek-v4-pro": 128_000,
-        "deepseek-v4-flash": 128_000,
+        "deepseek-v4-pro": 1_000_000,
+        "deepseek-v4-flash": 1_000_000,
         "deepseek-chat": 64_000,
         "deepseek-reasoner": 64_000,
     }
